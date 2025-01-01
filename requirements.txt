@@ -4,3 +4,4 @@ pyperclip>=1.8.2
 protobuf>=4.21.0
 Pillow>=9.0.0
 zstandard>=0.21.0
+pyinstaller>=5.13.0
