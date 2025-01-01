@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package copier;
+
+message ClipboardData {
+  enum ContentType {
+    TEXT = 0;
+    IMAGE = 1;
+  }
+  
+  ContentType type = 1;
+  string source_id = 2;
+  bytes content = 3;  // 压缩后的内容
+  int64 timestamp = 4;
+}
