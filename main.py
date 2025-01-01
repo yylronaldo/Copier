@@ -1,20 +1,21 @@
 import sys
-import json
+import time
 import uuid
-import base64
+import json
 import io
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QLabel, QSystemTrayIcon, QMenu, QPushButton,
                               QHBoxLayout, QListWidget, QListWidgetItem, QSplitter,
-                              QScrollArea, QTextEdit, QStackedWidget)
+                              QScrollArea, QTextEdit, QStackedWidget, QLineEdit)
 from PySide6.QtCore import Qt, QTimer, QBuffer, QByteArray, QSize, QRectF
-from PySide6.QtGui import QIcon, QImage, QPixmap, QPainter, QFont, QPen, QBrush, QColor, QFontMetrics
+from PySide6.QtGui import (QIcon, QImage, QPixmap, QPainter, QFont, QPen, QBrush, 
+                          QColor, QFontMetrics, QKeySequence, QShortcut)
+import base64
 import paho.mqtt.client as mqtt
 import pyperclip
 from settings_dialog import SettingsDialog
 from config import load_config, save_config
 from data_processor import DataProcessor
-import time
 
 class ClipboardItem:
     def __init__(self, content_type: str, content, timestamp: int):
@@ -47,9 +48,11 @@ class ClipboardItem:
         return time.strftime("%H:%M:%S", time.localtime(display_time / 1000))
 
 class MainWindow(QMainWindow):
+    VERSION = "2.1.0"
+    
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Copier")
+        self.setWindowTitle(f"Copier v{self.VERSION}")
         self.setMinimumSize(800, 600)
         
         # 设置应用程序样式
@@ -128,7 +131,11 @@ class MainWindow(QMainWindow):
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         
-        # 历史列表标题
+        # 历史列表标题和搜索框
+        header_widget = QWidget()
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
         history_label = QLabel("剪贴板历史")
         history_label.setStyleSheet("""
             font-size: 14px;
@@ -136,7 +143,26 @@ class MainWindow(QMainWindow):
             padding: 5px;
             color: #ffffff;
         """)
-        left_layout.addWidget(history_label)
+        header_layout.addWidget(history_label)
+        
+        # 添加搜索框
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("搜索历史记录...")
+        self.search_box.textChanged.connect(self.filter_history)
+        self.search_box.setStyleSheet("""
+            QLineEdit {
+                background-color: #3b3b3b;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                color: #ffffff;
+            }
+            QLineEdit:focus {
+                border: 1px solid #666666;
+            }
+        """)
+        header_layout.addWidget(self.search_box)
+        left_layout.addWidget(header_widget)
         
         # 历史列表
         self.history_list = QListWidget()
@@ -252,6 +278,9 @@ class MainWindow(QMainWindow):
         # 剪贴板历史
         self.clipboard_history = []
         self.max_history_size = 50  # 最多保存50条历史记录
+        
+        # 设置快捷键
+        self.setup_shortcuts()
         
         # 默认隐藏窗口，在系统托盘运行
         self.hide()
@@ -620,6 +649,57 @@ class MainWindow(QMainWindow):
         # 如果超过最大历史记录数，删除最后一项
         while self.history_list.count() > self.max_history_size:
             self.history_list.takeItem(self.history_list.count() - 1)
+
+    def setup_shortcuts(self):
+        """设置快捷键"""
+        # Ctrl+F 聚焦搜索框
+        search_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
+        search_shortcut.activated.connect(self.focus_search)
+        
+        # Ctrl+L 清空搜索框
+        clear_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        clear_shortcut.activated.connect(self.clear_search)
+        
+        # Ctrl+R 刷新列表
+        refresh_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        refresh_shortcut.activated.connect(self.refresh_history)
+        
+        # Esc 隐藏窗口
+        hide_shortcut = QShortcut(QKeySequence("Esc"), self)
+        hide_shortcut.activated.connect(self.hide)
+        
+        # Ctrl+Q 退出程序
+        quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
+        quit_shortcut.activated.connect(self.cleanup_and_quit)
+
+    def focus_search(self):
+        """聚焦搜索框"""
+        self.search_box.setFocus()
+        self.search_box.selectAll()
+
+    def clear_search(self):
+        """清空搜索框"""
+        self.search_box.clear()
+
+    def refresh_history(self):
+        """刷新历史记录列表"""
+        current_text = self.search_box.text()
+        self.filter_history(current_text)
+
+    def filter_history(self, text):
+        """根据搜索文本过滤历史记录"""
+        text = text.lower()
+        for i in range(self.history_list.count()):
+            item = self.history_list.item(i)
+            if not hasattr(item, 'clipboard_item'):
+                continue
+                
+            clipboard_item = item.clipboard_item
+            if clipboard_item.content_type == "text":
+                content = clipboard_item.content.lower()
+                item.setHidden(text not in content)
+            else:  # image
+                item.setHidden(text and text != "图片")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
