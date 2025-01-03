@@ -435,34 +435,58 @@ class MainWindow(QMainWindow):
             return
             
         try:
-            # 检查文本内容
-            text = self.clipboard.text()
-            if text:
-                content_type = "text"
-                _, compressed = self.data_processor.process_clipboard_data(content_type, text)
-                content_hash = self.calculate_content_hash(content_type, compressed)
-                
+            mime = self.clipboard.mimeData()
+            
+            if mime.hasImage():
+                image = mime.imageData()
+                if not image:
+                    return
+                    
+                content_hash = self.calculate_content_hash("image", 
+                    image.constBits().asstring(image.byteCount()))
+                    
                 if content_hash != self.last_content_hash:
+                    print("检测到新的图片内容")
                     self.last_content_hash = content_hash
-                    self.update_preview(content_type, text)
-                    self.add_to_history(content_type, text, int(time.time() * 1000))
-                    self.send_clipboard_content(content_type, compressed)
-                return
-
-            # 检查图片内容
-            image = self.clipboard.image()
-            if not image.isNull():
-                content_type = "image"
-                _, compressed = self.data_processor.process_clipboard_data(content_type, image)
-                content_hash = self.calculate_content_hash(content_type, compressed)
-                
+                    
+                    # 压缩图片
+                    compressed = self.data_processor.compress_clipboard_data(
+                        "image", image)
+                    
+                    # 更新预览和历史
+                    self.update_preview("image", image)
+                    self.add_to_history("image", image, int(time.time() * 1000))
+                    
+                    # 发送到其他设备
+                    self.send_clipboard_content("image", compressed)
+                    
+            elif mime.hasText():
+                text = mime.text()
+                if not text:
+                    return
+                    
+                content_hash = self.calculate_content_hash("text", 
+                    text.encode('utf-8'))
+                    
                 if content_hash != self.last_content_hash:
+                    print("检测到新的文本内容")
                     self.last_content_hash = content_hash
-                    self.update_preview(content_type, image)
-                    self.add_to_history(content_type, image, int(time.time() * 1000))
-                    self.send_clipboard_content(content_type, compressed)
+                    
+                    # 压缩文本
+                    compressed = self.data_processor.compress_clipboard_data(
+                        "text", text)
+                    
+                    # 更新预览和历史
+                    self.update_preview("text", text)
+                    self.add_to_history("text", text, int(time.time() * 1000))
+                    
+                    # 发送到其他设备
+                    self.send_clipboard_content("text", compressed)
+                    
         except Exception as e:
-            print(f"检查剪贴板内容时出错: {str(e)}")
+            print(f"检查剪贴板时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def enable_clipboard_monitoring(self):
         """重新启用剪贴板监听"""
@@ -472,14 +496,47 @@ class MainWindow(QMainWindow):
         """MQTT v5 消息回调"""
         try:
             if not self.mqtt_connected:
+                print("收到消息但MQTT未连接")
+                return
+            
+            print(f"收到消息 - 主题: {message.topic}, QoS: {message.qos}")
+            
+            # 解析不同类型的消息
+            if message.topic.endswith('/status'):
+                try:
+                    status_data = json.loads(message.payload)
+                    client_id = status_data.get('client_id')
+                    status = status_data.get('status')
+                    print(f"客户端状态更新 - ID: {client_id}, 状态: {status}")
+                except:
+                    pass
                 return
                 
-            payload = json.loads(message.payload)
+            if not message.topic.endswith('/content'):
+                print(f"未知的消息主题: {message.topic}")
+                return
+                
+            try:
+                payload = json.loads(message.payload)
+            except json.JSONDecodeError as e:
+                print(f"JSON解析错误: {str(e)}")
+                return
+                
             if payload.get("source") == self.client_id:
-                return  # 忽略自己发送的消息
+                print("忽略自己发送的消息")
+                return
                 
             content_type = payload.get("type")
+            if not content_type:
+                print("消息缺少类型信息")
+                return
+                
             content = base64.b64decode(payload.get("content", ""))
+            if not content:
+                print("消息内容为空")
+                return
+                
+            print(f"处理{content_type}类型的消息，大小: {len(content)}字节")
             
             if content_type == "text":
                 self.process_received_text(content)
@@ -487,8 +544,79 @@ class MainWindow(QMainWindow):
                 self.process_received_image(content)
             else:
                 print(f"未知的内容类型: {content_type}")
+                
         except Exception as e:
             print(f"处理消息时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def process_received_text(self, content):
+        """处理接收到的文本内容"""
+        try:
+            # 还原内容
+            text_content = self.data_processor.restore_clipboard_data("text", content)
+            print(f"还原后的文本长度: {len(text_content)}")
+            
+            # 计算内容哈希，避免重复处理
+            content_hash = self.calculate_content_hash("text", content)
+            if content_hash == self.last_content_hash:
+                print("忽略重复的文本内容")
+                return
+                
+            self.last_content_hash = content_hash
+            
+            # 更新预览和历史
+            self.update_preview("text", text_content)
+            self.add_to_history("text", text_content, int(time.time() * 1000))
+            
+            # 暂时禁用剪贴板监听
+            self.clipboard_monitoring_enabled = False
+            
+            # 更新剪贴板
+            print("更新剪贴板文本内容")
+            self.clipboard.setText(text_content)
+            
+            # 延迟重新启用剪贴板监听
+            QTimer.singleShot(1000, self.enable_clipboard_monitoring)
+            
+        except Exception as e:
+            print(f"处理文本内容时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def process_received_image(self, content):
+        """处理接收到的图片内容"""
+        try:
+            # 还原内容
+            image_content = self.data_processor.restore_clipboard_data("image", content)
+            print(f"还原后的图片大小: {image_content.size()}")
+            
+            # 计算内容哈希，避免重复处理
+            content_hash = self.calculate_content_hash("image", content)
+            if content_hash == self.last_content_hash:
+                print("忽略重复的图片内容")
+                return
+                
+            self.last_content_hash = content_hash
+            
+            # 更新预览和历史
+            self.update_preview("image", image_content)
+            self.add_to_history("image", image_content, int(time.time() * 1000))
+            
+            # 暂时禁用剪贴板监听
+            self.clipboard_monitoring_enabled = False
+            
+            # 更新剪贴板
+            print("更新剪贴板图片内容")
+            self.clipboard.setImage(image_content)
+            
+            # 延迟重新启用剪贴板监听
+            QTimer.singleShot(1000, self.enable_clipboard_monitoring)
+            
+        except Exception as e:
+            print(f"处理图片内容时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def on_disconnect(self, client, userdata, reason_code, properties):
         """MQTT v5 断开连接回调"""
@@ -819,50 +947,6 @@ class MainWindow(QMainWindow):
             self.mqtt_connected = False
             if not self.reconnect_timer.isActive():
                 QTimer.singleShot(0, lambda: self.reconnect_timer.start())
-
-    def process_received_text(self, content):
-        """处理接收到的文本内容"""
-        try:
-            # 还原内容
-            text_content = self.data_processor.restore_clipboard_data("text", content)
-            
-            # 计算内容哈希，避免重复处理
-            content_hash = self.calculate_content_hash("text", content)
-            if content_hash == self.last_content_hash:
-                return
-                
-            self.last_content_hash = content_hash
-            
-            # 更新预览和历史
-            self.update_preview("text", text_content)
-            self.add_to_history("text", text_content, int(time.time() * 1000))
-            
-            # 更新剪贴板
-            self.clipboard.setText(text_content)
-        except Exception as e:
-            print(f"处理文本内容时出错: {str(e)}")
-
-    def process_received_image(self, content):
-        """处理接收到的图片内容"""
-        try:
-            # 还原内容
-            image_content = self.data_processor.restore_clipboard_data("image", content)
-            
-            # 计算内容哈希，避免重复处理
-            content_hash = self.calculate_content_hash("image", content)
-            if content_hash == self.last_content_hash:
-                return
-                
-            self.last_content_hash = content_hash
-            
-            # 更新预览和历史
-            self.update_preview("image", image_content)
-            self.add_to_history("image", image_content, int(time.time() * 1000))
-            
-            # 更新剪贴板
-            self.clipboard.setImage(image_content)
-        except Exception as e:
-            print(f"处理图片内容时出错: {str(e)}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
