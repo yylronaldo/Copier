@@ -11,6 +11,7 @@ Copier 是一个基于 MQTT 的跨设备剪贴板同步工具，支持文本和�
 - 系统托盘：最小化到系统托盘，不影响日常使用
 - 自动重连：网络断开时自动重连
 - 图片优化：自动压缩图片，节省带宽
+- 跨平台支持：支持 Windows 和 macOS
 
 ## 系统要求
 
@@ -75,9 +76,11 @@ Copier 是一个基于 MQTT 的跨设备剪贴板同步工具，支持文本和�
 - Windows：
   - 更长的 MQTT 保活时间（120秒）
   - 更长的重连间隔（10秒）
+  - 优化的图片压缩参数
 - macOS：
   - 标准的 MQTT 保活时间（60秒）
   - 标准的重连间隔（5秒）
+  - 标准的图片压缩参数
 
 ## 开发说明
 
@@ -92,7 +95,7 @@ Copier 是一个基于 MQTT 的跨设备剪贴板同步工具，支持文本和�
 ### 构建说明
 使用 PyInstaller 构建可执行文件：
 ```bash
-pyinstaller --windowed --icon=icon.ico main.py
+pyinstaller copier.spec
 ```
 
 ## 更新日志
@@ -102,6 +105,9 @@ pyinstaller --windowed --icon=icon.ico main.py
 - 改进 Windows 和 macOS 的兼容性
 - 优化网络连接的稳定性
 - 改进错误处理和日志记录
+- 修复线程安全问题
+- 优化剪贴板监听逻辑
+- 添加自定义应用图标
 
 ## 许可证
 

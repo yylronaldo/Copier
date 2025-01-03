@@ -17,6 +17,7 @@ from settings_dialog import SettingsDialog
 from config import load_config, save_config
 from data_processor import DataProcessor
 import platform
+import threading
 
 class ClipboardItem:
     def __init__(self, content_type: str, content, timestamp: int):
@@ -293,6 +294,18 @@ class MainWindow(QMainWindow):
         
         # 默认隐藏窗口，在系统托盘运行
         self.hide()
+        
+        # 创建一个定时器用于在主线程中处理接收到的数据
+        self.process_timer = QTimer()
+        self.process_timer.timeout.connect(self.process_pending_data)
+        self.process_timer.start(100)  # 每100ms检查一次
+        
+        # 用于存储待处理的数据
+        self.pending_data = []
+        self.pending_data_lock = threading.Lock()
+        
+        # 添加一个标志来跟踪是否正在接收内容
+        self.is_receiving_content = False
 
     def update_preview(self, content_type: str, content):
         """更新预览区域"""
@@ -468,7 +481,7 @@ class MainWindow(QMainWindow):
                 content_hash = self.calculate_content_hash("text", 
                     text.encode('utf-8'))
                     
-                if content_hash != self.last_content_hash:
+                if content_hash != self.last_content_hash and not self.is_receiving_content:
                     print("检测到新的文本内容")
                     self.last_content_hash = content_hash
                     
@@ -538,23 +551,42 @@ class MainWindow(QMainWindow):
                 
             print(f"处理{content_type}类型的消息，大小: {len(content)}字节")
             
-            if content_type == "text":
-                self.process_received_text(content)
-            elif content_type == "image":
-                self.process_received_image(content)
-            else:
-                print(f"未知的内容类型: {content_type}")
+            # 将数据添加到待处理队列
+            with self.pending_data_lock:
+                self.pending_data.append((content_type, content))
                 
         except Exception as e:
             print(f"处理消息时出错: {str(e)}")
             import traceback
             traceback.print_exc()
 
+    def process_pending_data(self):
+        """在主线程中处理待处理的数据"""
+        with self.pending_data_lock:
+            if not self.pending_data:
+                return
+                
+            data = self.pending_data.pop(0)
+            content_type, content = data
+            
+            try:
+                if content_type == "text":
+                    self.process_received_text(content)
+                elif content_type == "image":
+                    self.process_received_image(content)
+            except Exception as e:
+                print(f"处理数据时出错: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
     def process_received_text(self, content):
         """处理接收到的文本内容"""
         try:
+            # 标记正在接收内容
+            self.is_receiving_content = True
+            
             # 还原内容
-            _, text_content = self.data_processor.process_clipboard_data("text", content, restore=True)
+            text_content = self.data_processor.restore_clipboard_data("text", content)
             print(f"还原后的文本长度: {len(text_content)}")
             
             # 计算内容哈希，避免重复处理
@@ -569,26 +601,29 @@ class MainWindow(QMainWindow):
             self.update_preview("text", text_content)
             self.add_to_history("text", text_content, int(time.time() * 1000))
             
-            # 暂时禁用剪贴板监听
-            self.clipboard_monitoring_enabled = False
-            
             # 更新剪贴板
             print("更新剪贴板文本内容")
             self.clipboard.setText(text_content)
             
-            # 延迟重新启用剪贴板监听
-            QTimer.singleShot(1000, self.enable_clipboard_monitoring)
+            # 延迟重置接收标志
+            QTimer.singleShot(1000, self.reset_receiving_flag)
             
         except Exception as e:
             print(f"处理文本内容时出错: {str(e)}")
             import traceback
             traceback.print_exc()
+        finally:
+            # 确保标志被重置
+            self.is_receiving_content = False
 
     def process_received_image(self, content):
         """处理接收到的图片内容"""
         try:
+            # 标记正在接收内容
+            self.is_receiving_content = True
+            
             # 还原内容
-            _, image_content = self.data_processor.process_clipboard_data("image", content, restore=True)
+            image_content = self.data_processor.restore_clipboard_data("image", content)
             print(f"还原后的图片大小: {image_content.size()}")
             
             # 计算内容哈希，避免重复处理
@@ -603,20 +638,24 @@ class MainWindow(QMainWindow):
             self.update_preview("image", image_content)
             self.add_to_history("image", image_content, int(time.time() * 1000))
             
-            # 暂时禁用剪贴板监听
-            self.clipboard_monitoring_enabled = False
-            
             # 更新剪贴板
             print("更新剪贴板图片内容")
             self.clipboard.setImage(image_content)
             
-            # 延迟重新启用剪贴板监听
-            QTimer.singleShot(1000, self.enable_clipboard_monitoring)
+            # 延迟重置接收标志
+            QTimer.singleShot(1000, self.reset_receiving_flag)
             
         except Exception as e:
             print(f"处理图片内容时出错: {str(e)}")
             import traceback
             traceback.print_exc()
+        finally:
+            # 确保标志被重置
+            self.is_receiving_content = False
+            
+    def reset_receiving_flag(self):
+        """重置接收内容标志"""
+        self.is_receiving_content = False
 
     def on_disconnect(self, client, userdata, reason_code, properties):
         """MQTT v5 断开连接回调"""
@@ -718,7 +757,7 @@ class MainWindow(QMainWindow):
             
         try:
             config = load_config()
-            topic_prefix = config['mqtt'].get('topic_prefix', 'copier/clipboard')
+            topic_prefix = config.get('mqtt', {}).get('topic_prefix', 'copier/clipboard')
             topic = f"{topic_prefix}/content"
             
             # 使用base64编码压缩后的二进制数据
