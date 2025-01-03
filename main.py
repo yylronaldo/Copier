@@ -13,6 +13,7 @@ from PySide6.QtGui import (QIcon, QImage, QPixmap, QPainter, QFont, QPen, QBrush
 import base64
 import paho.mqtt.client as mqtt
 import pyperclip
+import hashlib
 from settings_dialog import SettingsDialog
 from config import load_config, save_config
 from data_processor import DataProcessor
@@ -457,9 +458,7 @@ class MainWindow(QMainWindow):
                 if not image:
                     return
                     
-                content_hash = self.calculate_content_hash("image", 
-                    image.constBits().asstring(image.byteCount()))
-                    
+                content_hash = self.calculate_content_hash("image", image)
                 if content_hash != self.last_sent_hash:
                     print("检测到新的图片内容")
                     self.last_sent_hash = content_hash
@@ -739,9 +738,28 @@ class MainWindow(QMainWindow):
                 self.reconnect_timer.moveToThread(QApplication.instance().thread())
                 self.reconnect_timer.start()
 
-    def calculate_content_hash(self, content_type: str, content: bytes) -> str:
-        """计算内容的哈希值，用于去重"""
-        return f"{content_type}:{base64.b64encode(content).decode()[:32]}"
+    def calculate_content_hash(self, content_type: str, content) -> str:
+        """计算内容的哈希值"""
+        try:
+            if content_type == "image" and isinstance(content, QImage):
+                # 将 QImage 转换为字节数组
+                buffer = QByteArray()
+                buffer_device = QBuffer(buffer)
+                buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
+                content.save(buffer_device, "PNG")
+                buffer_device.close()
+                content_bytes = buffer.data()
+            elif content_type == "image" and isinstance(content, bytes):
+                content_bytes = content
+            else:
+                content_bytes = content if isinstance(content, bytes) else str(content).encode('utf-8')
+                
+            return hashlib.sha256(content_bytes).hexdigest()
+        except Exception as e:
+            print(f"计算哈希值时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return str(time.time())  # 如果计算失败，返回时间戳作为备用
 
     def send_clipboard_content(self, content_type: str, compressed_content: bytes):
         """发送剪贴板内容到MQTT服务器"""
