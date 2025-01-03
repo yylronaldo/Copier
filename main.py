@@ -59,6 +59,62 @@ class MainWindow(QMainWindow):
         # 添加操作系统判断
         self.is_windows = platform.system().lower() == 'windows'
         
+        # 初始化数据处理器
+        self.data_processor = DataProcessor()
+        
+        # 初始化剪贴板
+        self.clipboard = QApplication.clipboard()
+        self.clipboard.dataChanged.connect(self.on_clipboard_change)
+        
+        # 初始化UI
+        self.setup_ui()
+        
+        # 启动时先禁用剪贴板监听
+        self.clipboard_monitoring_enabled = False
+        
+        # 添加防抖动延迟
+        self.clipboard_debounce_timer = QTimer()
+        self.clipboard_debounce_timer.setSingleShot(True)
+        self.clipboard_debounce_timer.timeout.connect(self.check_clipboard)
+        
+        # 设置快捷键
+        self.setup_shortcuts()
+        
+        # 初始化MQTT客户端
+        self.client_id = str(uuid.uuid4())
+        self.mqtt_client = None
+        self.mqtt_connected = False
+        self.reconnect_timer = QTimer()
+        self.reconnect_timer.timeout.connect(self.setup_mqtt)
+        self.reconnect_timer.setInterval(5000)  # 5秒后重试
+        
+        # 设置MQTT连接
+        self.setup_mqtt()
+        
+        # 添加一个标志来跟踪是否正在接收内容
+        self.is_receiving_content = False
+        self.received_hashes = set()   # 用于跟踪最近接收的内容哈希
+        self.sent_hashes = set()       # 用于跟踪最近发送的内容哈希
+        self.hash_cleanup_timer = QTimer()
+        self.hash_cleanup_timer.timeout.connect(self.cleanup_hashes)
+        self.hash_cleanup_timer.start(60000)  # 每分钟清理一次
+        
+        # 记录初始剪贴板内容的哈希
+        self.record_initial_clipboard_hash()
+
+        # 默认隐藏窗口，在系统托盘运行
+        self.hide()
+        
+        # 创建一个定时器用于在主线程中处理接收到的数据
+        self.process_timer = QTimer()
+        self.process_timer.timeout.connect(self.process_pending_data)
+        self.process_timer.start(100)  # 每100ms检查一次
+        
+        # 用于存储待处理的数据
+        self.pending_data = []
+        self.pending_data_lock = threading.Lock()
+        
+    def setup_ui(self):
         self.setWindowTitle(f"Copier v{self.VERSION}")
         self.setMinimumSize(800, 600)
         
@@ -115,23 +171,6 @@ class MainWindow(QMainWindow):
                 background-color: #555555;
             }
         """)
-        
-        # 生成唯一客户端ID
-        self.client_id = str(uuid.uuid4())
-        
-        # 初始化数据处理器
-        self.data_processor = DataProcessor()
-        
-        # 剪贴板
-        self.clipboard = QApplication.clipboard()
-        self.clipboard.dataChanged.connect(self.on_clipboard_change)
-        
-        # 上一次的剪贴板内容哈希
-        self.last_content_hash = None
-        
-        # 剪贴板历史
-        self.clipboard_history = []
-        self.max_history_size = 50  # 最多保存50条历史记录
         
         # 创建中央窗口部件
         central_widget = QWidget()
@@ -265,54 +304,7 @@ class MainWindow(QMainWindow):
         
         # 初始化系统托盘
         self.setup_tray()
-        
-        # 启动时先禁用剪贴板监听
-        self.clipboard_monitoring_enabled = False
-        
-        # 初始化剪贴板监控定时器
-        self.clipboard_timer = QTimer(self)
-        self.clipboard_timer.timeout.connect(self.check_clipboard)
-        self.clipboard_timer.start(500)  # 每500毫秒检查一次
-        
-        # 添加剪贴板变化延迟检查
-        self.last_clipboard_change = 0
-        
-        # 设置快捷键
-        self.setup_shortcuts()
-        
-        # 初始化MQTT客户端
-        self.mqtt_client = None
-        self.mqtt_connected = False
-        self.reconnect_timer = QTimer()
-        self.reconnect_timer.timeout.connect(self.setup_mqtt)
-        self.reconnect_timer.setInterval(5000)  # 5秒后重试
-        
-        # 设置MQTT连接
-        self.setup_mqtt()
-        
-        # 添加一个标志来跟踪是否正在接收内容
-        self.is_receiving_content = False
-        self.received_hashes = set()   # 用于跟踪最近接收的内容哈希
-        self.sent_hashes = set()       # 用于跟踪最近发送的内容哈希
-        self.hash_cleanup_timer = QTimer()
-        self.hash_cleanup_timer.timeout.connect(self.cleanup_hashes)
-        self.hash_cleanup_timer.start(60000)  # 每分钟清理一次
-        
-        # 记录初始剪贴板内容的哈希
-        self.record_initial_clipboard_hash()
-        
-        # 默认隐藏窗口，在系统托盘运行
-        self.hide()
-        
-        # 创建一个定时器用于在主线程中处理接收到的数据
-        self.process_timer = QTimer()
-        self.process_timer.timeout.connect(self.process_pending_data)
-        self.process_timer.start(100)  # 每100ms检查一次
-        
-        # 用于存储待处理的数据
-        self.pending_data = []
-        self.pending_data_lock = threading.Lock()
-        
+
     def update_preview(self, content_type: str, content):
         """更新预览区域"""
         if content_type == "text":
@@ -452,7 +444,9 @@ class MainWindow(QMainWindow):
         """剪贴板内容变化回调"""
         if not self.clipboard_monitoring_enabled or self.is_receiving_content:
             return
-        self.check_clipboard()
+        
+        # 使用100ms的防抖动延迟
+        self.clipboard_debounce_timer.start(100)
 
     def check_clipboard(self):
         """检查剪贴板内容是否发生变化"""
@@ -460,11 +454,6 @@ class MainWindow(QMainWindow):
             return
             
         try:
-            current_time = time.time()
-            if current_time - self.last_clipboard_change < 0.5:  # 500ms内不重复检查
-                return
-                
-            self.last_clipboard_change = current_time
             mime = self.clipboard.mimeData()
             
             if mime.hasImage():
@@ -476,13 +465,13 @@ class MainWindow(QMainWindow):
                 buffer = QByteArray()
                 buffer_device = QBuffer(buffer)
                 buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
-                image.save(buffer_device, "PNG")
+                image.save(buffer_device, "PNG", 100)  # 使用最高质量保存
                 buffer_device.close()
                 image_bytes = buffer.data()
                 content_hash = self.calculate_content_hash("image", image_bytes)
                 
                 if content_hash not in self.sent_hashes and content_hash not in self.received_hashes:
-                    print("检测到新的图片内容")
+                    print(f"检测到新的图片内容，哈希值: {content_hash}")
                     self.sent_hashes.add(content_hash)
                     
                     # 压缩图片
@@ -495,6 +484,8 @@ class MainWindow(QMainWindow):
                     
                     # 发送到其他设备
                     self.send_clipboard_content("image", compressed)
+                else:
+                    print(f"忽略重复的图片内容，哈希值: {content_hash}")
                     
             elif mime.hasText():
                 text = mime.text()
@@ -503,7 +494,7 @@ class MainWindow(QMainWindow):
                     
                 content_hash = self.calculate_content_hash("text", text.encode('utf-8'))
                 if content_hash not in self.sent_hashes and content_hash not in self.received_hashes:
-                    print("检测到新的文本内容")
+                    print(f"检测到新的文本内容，哈希值: {content_hash}")
                     self.sent_hashes.add(content_hash)
                     
                     # 压缩文本
@@ -516,6 +507,8 @@ class MainWindow(QMainWindow):
                     
                     # 发送到其他设备
                     self.send_clipboard_content("text", compressed)
+                else:
+                    print(f"忽略重复的文本内容，哈希值: {content_hash}")
                     
         except Exception as e:
             print(f"检查剪贴板时出错: {str(e)}")
@@ -609,16 +602,31 @@ class MainWindow(QMainWindow):
             # 计算内容哈希，避免重复处理
             content_hash = self.calculate_content_hash("image", content)
             if content_hash in self.received_hashes or content_hash in self.sent_hashes:
-                print("忽略重复的图片内容")
+                print(f"忽略重复的图片内容，哈希值: {content_hash}")
                 return
                 
-            print("接收新的图片内容")
-            self.received_hashes.add(content_hash)
-            self.sent_hashes.add(content_hash)  # 也添加到发送哈希中，避免重复发送
+            print(f"接收新的图片内容，哈希值: {content_hash}")
             
             # 还原内容
             image_content = self.data_processor.restore_clipboard_data("image", content)
+            if not image_content:
+                print("还原图片内容失败")
+                return
+                
             print(f"还原后的图片大小: {image_content.size()}")
+            
+            # 计算还原后图片的哈希值
+            buffer = QByteArray()
+            buffer_device = QBuffer(buffer)
+            buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
+            image_content.save(buffer_device, "PNG", 100)  # 使用最高质量保存
+            buffer_device.close()
+            restored_hash = self.calculate_content_hash("image", buffer.data())
+            
+            self.received_hashes.add(content_hash)
+            self.received_hashes.add(restored_hash)
+            self.sent_hashes.add(content_hash)
+            self.sent_hashes.add(restored_hash)
             
             # 更新预览和历史
             self.update_preview("image", image_content)
@@ -645,16 +653,26 @@ class MainWindow(QMainWindow):
             # 计算内容哈希，避免重复处理
             content_hash = self.calculate_content_hash("text", content)
             if content_hash in self.received_hashes or content_hash in self.sent_hashes:
-                print("忽略重复的文本内容")
+                print(f"忽略重复的文本内容，哈希值: {content_hash}")
                 return
                 
-            print("接收新的文本内容")
-            self.received_hashes.add(content_hash)
-            self.sent_hashes.add(content_hash)  # 也添加到发送哈希中，避免重复发送
+            print(f"接收新的文本内容，哈希值: {content_hash}")
             
             # 还原内容
             text_content = self.data_processor.restore_clipboard_data("text", content)
+            if not text_content:
+                print("还原文本内容失败")
+                return
+                
             print(f"还原后的文本长度: {len(text_content)}")
+            
+            # 计算还原后文本的哈希值
+            restored_hash = self.calculate_content_hash("text", text_content.encode('utf-8'))
+            
+            self.received_hashes.add(content_hash)
+            self.received_hashes.add(restored_hash)
+            self.sent_hashes.add(content_hash)
+            self.sent_hashes.add(restored_hash)
             
             # 更新预览和历史
             self.update_preview("text", text_content)
@@ -699,7 +717,7 @@ class MainWindow(QMainWindow):
                 buffer = QByteArray()
                 buffer_device = QBuffer(buffer)
                 buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
-                content.save(buffer_device, "PNG")
+                content.save(buffer_device, "PNG", 100)  # 使用最高质量保存
                 buffer_device.close()
                 content_bytes = buffer.data()
             elif content_type == "image" and isinstance(content, bytes):
@@ -792,8 +810,8 @@ class MainWindow(QMainWindow):
         """清理并退出程序"""
         try:
             # 停止所有定时器
-            if hasattr(self, 'clipboard_timer'):
-                self.clipboard_timer.stop()
+            if hasattr(self, 'clipboard_debounce_timer'):
+                self.clipboard_debounce_timer.stop()
             if hasattr(self, 'reconnect_timer') and self.reconnect_timer.isActive():
                 self.reconnect_timer.stop()
             
@@ -820,8 +838,8 @@ class MainWindow(QMainWindow):
         """处理窗口关闭事件"""
         try:
             # 停止所有定时器
-            if hasattr(self, 'clipboard_timer'):
-                self.clipboard_timer.stop()
+            if hasattr(self, 'clipboard_debounce_timer'):
+                self.clipboard_debounce_timer.stop()
             if hasattr(self, 'reconnect_timer') and self.reconnect_timer.isActive():
                 self.reconnect_timer.stop()
             
@@ -915,7 +933,7 @@ class MainWindow(QMainWindow):
         self.history_list.insertItem(0, list_item)
         
         # 如果超过最大历史记录数，删除最后一项
-        while self.history_list.count() > self.max_history_size:
+        while self.history_list.count() > 50:
             self.history_list.takeItem(self.history_list.count() - 1)
 
     def setup_mqtt(self):
@@ -1053,7 +1071,7 @@ class MainWindow(QMainWindow):
                     buffer = QByteArray()
                     buffer_device = QBuffer(buffer)
                     buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
-                    image.save(buffer_device, "PNG")
+                    image.save(buffer_device, "PNG", 100)  # 使用最高质量保存
                     buffer_device.close()
                     image_bytes = buffer.data()
                     content_hash = self.calculate_content_hash("image", image_bytes)
