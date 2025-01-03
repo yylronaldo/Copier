@@ -9,11 +9,12 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QScrollArea, QTextEdit, QStackedWidget, QLineEdit,
                               QMessageBox)
 from PySide6.QtCore import (Qt, QTimer, QBuffer, QByteArray, QSize, QRectF,
-                           QMetaObject, Q_ARG)
+                           QMetaObject, Q_ARG, QSettings)
 from PySide6.QtGui import (QIcon, QImage, QPixmap, QPainter, QFont, QPen, QBrush, 
                           QColor, QFontMetrics, QKeySequence, QShortcut)
 import base64
 import paho.mqtt.client as mqtt
+from paho.mqtt.packettypes import PacketTypes
 import pyperclip
 import hashlib
 from settings_dialog import SettingsDialog
@@ -21,6 +22,20 @@ from config import load_config, save_config
 from data_processor import DataProcessor
 import platform
 import threading
+
+# macOS 特定的模块导入
+MACOS_MODULES_AVAILABLE = False
+if platform.system().lower() == 'darwin':
+    try:
+        import objc
+        from Foundation import NSString, NSPasteboard, NSObject, NSURL
+        from AppKit import (NSWorkspace, NSPasteboardTypeString, NSApplication,
+                        NSApp, NSAlert, NSWorkspaceWillPowerOffNotification)
+        import Cocoa
+        from ApplicationServices import AXIsProcessTrusted, AXAPIEnabled
+        MACOS_MODULES_AVAILABLE = True
+    except ImportError:
+        print("macOS 模块导入失败")
 
 class ClipboardItem:
     def __init__(self, content_type: str, content, timestamp: int):
@@ -57,79 +72,15 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        print("初始化主窗口...")
         
         # 添加操作系统判断
         self.is_windows = platform.system().lower() == 'windows'
         self.is_macos = platform.system().lower() == 'darwin'
-        
-        # 在 macOS 上尝试使用 NSPasteboard
-        if self.is_macos:
-            try:
-                # 尝试导入 macOS 特定的模块
-                import objc
-                from Foundation import NSString, NSPasteboard, NSObject, NSURL
-                from AppKit import (NSWorkspace, NSPasteboardTypeString, NSApplication,
-                                 NSApp, NSAlert, NSWorkspaceWillPowerOffNotification)
-                import Cocoa
-                from ApplicationServices import AXIsProcessTrusted, AXAPIEnabled
-                
-                # 检查辅助功能权限
-                if not AXIsProcessTrusted():
-                    print("需要辅助功能权限")
-                    alert = NSAlert.alloc().init()
-                    alert.setMessageText_("需要辅助功能权限")
-                    alert.setInformativeText_("Copier 需要辅助功能权限来监控剪贴板变化。请在系统偏好设置中授予权限。")
-                    alert.addButtonWithTitle_("打开系统偏好设置")
-                    alert.addButtonWithTitle_("退出")
-                    
-                    if alert.runModal() == NSAlert.NSAlertFirstButtonReturn:
-                        # 打开系统偏好设置的辅助功能面板
-                        NSURL.URLWithString_("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility").open()
-                        sys.exit(0)
-                    else:
-                        sys.exit(1)
-                
-                print("已获得辅助功能权限")
-                
-                # 创建一个 NSObject 子类来监听剪贴板变化
-                class PasteboardObserver(NSObject):
-                    def init(self):
-                        self = objc.super(PasteboardObserver, self).init()
-                        return self
-                        
-                    def initWithCallback_(self, callback):
-                        self = self.init()
-                        if self is not None:
-                            self.callback = callback
-                        return self
-                    
-                    def pasteboardDidChange_(self, notification):
-                        self.callback()
-                
-                print("成功导入 macOS 模块")
-                # 初始化 NSPasteboard
-                self.pasteboard = NSPasteboard.generalPasteboard()
-                self.last_change_count = self.pasteboard.changeCount()
-                print(f"初始化 NSPasteboard，当前变化计数：{self.last_change_count}")
-                
-                # 创建并注册观察者
-                self.observer = PasteboardObserver.alloc().initWithCallback_(self.check_clipboard)
-                NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
-                    self.observer,
-                    "pasteboardDidChange:",
-                    "NSPasteboardDidChangeNotification",
-                    None
-                )
-                print("注册 NSPasteboard 观察者")
-                self.macos_modules_available = True
-                
-            except Exception as e:
-                print(f"无法初始化 macOS 模块: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                self.macos_modules_available = False
+        print(f"操作系统: {'macOS' if self.is_macos else 'Windows' if self.is_windows else 'Other'}")
         
         # 初始化数据处理器
+        print("初始化数据处理器...")
         self.data_processor = DataProcessor()
         
         # 初始化剪贴板
@@ -166,21 +117,105 @@ class MainWindow(QMainWindow):
         self.received_hashes = set()   # 用于跟踪最近接收的内容哈希
         self.sent_hashes = set()       # 用于跟踪最近发送的内容哈希
         
+        # 在 macOS 上尝试使用 NSPasteboard
+        if self.is_macos and MACOS_MODULES_AVAILABLE:
+            print("检查辅助功能权限...")
+            try:
+                # 检查辅助功能权限
+                if not AXIsProcessTrusted():
+                    print("需要辅助功能权限")
+                    alert = NSAlert.alloc().init()
+                    alert.setMessageText_("需要辅助功能权限")
+                    alert.setInformativeText_("Copier 需要辅助功能权限来监控剪贴板变化。请在系统偏好设置中授予权限。")
+                    alert.addButtonWithTitle_("打开系统偏好设置")
+                    alert.addButtonWithTitle_("退出")
+                    
+                    response = alert.runModal()
+                    print(f"用户选择: {response}")
+                    if response == 1000:  # NSAlertFirstButtonReturn
+                        # 打开系统偏好设置的辅助功能面板
+                        url = NSURL.URLWithString_("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                        NSWorkspace.sharedWorkspace().openURL_(url)
+                        print("已打开系统偏好设置")
+                        
+                        # 设置定时器检查权限状态
+                        print("启动权限检查定时器...")
+                        self.permission_timer = QTimer()
+                        self.permission_timer.timeout.connect(self.check_permission)
+                        self.permission_timer.start(1000)  # 每秒检查一次
+                    else:
+                        print("用户选择退出")
+                        sys.exit(0)
+                else:
+                    print("已有辅助功能权限")
+                    self.enable_clipboard_monitoring()
+                
+                # 获取 NSPasteboard
+                print("初始化 NSPasteboard...")
+                self.pasteboard = NSPasteboard.generalPasteboard()
+                self.last_change_count = self.pasteboard.changeCount()
+                self.macos_modules_available = True
+                print(f"NSPasteboard 初始化成功，当前变化计数: {self.last_change_count}")
+                
+                # 设置关机通知观察者
+                print("设置关机通知观察者...")
+                self.observer = self.PasteboardObserver.alloc().initWithCallback_(self.cleanup_and_quit)
+                NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
+                    self.observer,
+                    self.observer.handlePowerOff_,
+                    NSWorkspaceWillPowerOffNotification,
+                    None
+                )
+                print("关机通知观察者设置成功")
+                
+            except Exception as e:
+                print(f"初始化 NSPasteboard 失败: {e}")
+                import traceback
+                traceback.print_exc()
+                self.macos_modules_available = False
+        else:
+            print("macOS 模块不可用")
+            self.macos_modules_available = False
+        
         # 记录初始剪贴板内容的哈希
         self.record_initial_clipboard_hash()
+        
+        # 总是显示主界面
+        self.show()
+
+    def check_permission(self):
+        """检查辅助功能权限状态"""
+        print("检查权限状态...")
+        if AXIsProcessTrusted():
+            print("已获得辅助功能权限")
+            self.permission_timer.stop()
+            print("权限检查定时器已停止")
+            self.enable_clipboard_monitoring()
+            print("剪贴板监控已启用")
+        else:
+            print("等待用户授予权限...")
+
+    def enable_clipboard_monitoring(self):
+        """启用剪贴板监听"""
+        print("启用剪贴板监听...")
+        self.clipboard_monitoring_enabled = True
+        
+        # 设置定时器检查剪贴板变化
+        print("设置剪贴板检查定时器...")
+        if not hasattr(self, 'clipboard_timer'):
+            self.clipboard_timer = QTimer()
+            self.clipboard_timer.timeout.connect(self.check_clipboard)
+        if not self.clipboard_timer.isActive():
+            self.clipboard_timer.start(1000)  # 每秒检查一次
+            print("剪贴板检查定时器已启动")
 
     def check_clipboard(self):
         """检查剪贴板变化"""
+        if not self.clipboard_monitoring_enabled:
+            return
+        
         try:
-            if not self.clipboard_monitoring_enabled:
-                return
-                
-            if self.is_receiving_content:
-                print("正在接收内容，跳过检查")
-                return
-                
             if self.is_macos and self.macos_modules_available:
-                # 检查 NSPasteboard 变化计数
                 current_count = self.pasteboard.changeCount()
                 if current_count != self.last_change_count:
                     print(f"检测到剪贴板变化：{self.last_change_count} -> {current_count}")
@@ -188,6 +223,7 @@ class MainWindow(QMainWindow):
                     
                     # 获取剪贴板内容
                     if self.pasteboard.types():
+                        print(f"剪贴板类型: {self.pasteboard.types()}")
                         # 检查是否有文本内容
                         if "public.utf8-plain-text" in self.pasteboard.types():
                             text = self.pasteboard.stringForType_("public.utf8-plain-text")
@@ -195,7 +231,7 @@ class MainWindow(QMainWindow):
                                 print(f"从 NSPasteboard 获取到文本，长度：{len(text)}")
                                 self.process_text(text)
                                 return
-                            
+                        
                         # 检查是否有图片内容
                         image_types = ["public.png", "public.tiff", "public.jpeg"]
                         for image_type in image_types:
@@ -207,222 +243,23 @@ class MainWindow(QMainWindow):
                                     return
                     else:
                         print("NSPasteboard 内容为空")
-                        
-            # 对于 Windows 或 macOS 备用方案，使用 QClipboard
-            mime = self.clipboard.mimeData()
-            
-            if mime.hasText():
-                text = mime.text()
-                if text:
-                    self.process_text(text)
-            elif mime.hasImage():
-                image = mime.imageData()
-                if image:
-                    self.process_image(image)
-                    
+            else:
+                # Windows 上使用 Qt 的剪贴板事件
+                mime = self.clipboard.mimeData()
+                if mime.hasText():
+                    text = mime.text()
+                    if text:
+                        print(f"从 Qt 剪贴板获取到文本，长度：{len(text)}")
+                        self.process_text(text)
+                elif mime.hasImage():
+                    image = mime.imageData()
+                    if image:
+                        print("从 Qt 剪贴板获取到图片")
+                        self.process_image(image)
         except Exception as e:
-            print(f"检查剪贴板时出错: {str(e)}")
+            print(f"检查剪贴板时出错: {e}")
             import traceback
             traceback.print_exc()
-            
-    def on_clipboard_change(self):
-        """剪贴板内容变化回调"""
-        if not self.clipboard_monitoring_enabled or self.is_receiving_content:
-            return
-            
-        # 使用防抖动延迟
-        self.clipboard_debounce_timer.start(100)
-
-    def setup_ui(self):
-        self.setWindowTitle(f"Copier v{self.VERSION}")
-        self.setMinimumSize(800, 600)
-        
-        # 设置应用程序样式
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #2b2b2b;
-            }
-            QWidget {
-                background-color: #2b2b2b;
-                color: #ffffff;
-            }
-            QLabel {
-                color: #ffffff;
-            }
-            QPushButton {
-                background-color: #3b3b3b;
-                border: 1px solid #555555;
-                color: #ffffff;
-                padding: 5px 15px;
-                border-radius: 3px;
-            }
-            QPushButton:hover {
-                background-color: #454545;
-            }
-            QListWidget {
-                background-color: #2b2b2b;
-                border: 1px solid #555555;
-                color: #ffffff;
-            }
-            QListWidget::item {
-                padding: 5px;
-            }
-            QListWidget::item:selected {
-                background-color: #3b3b3b;
-            }
-            QListWidget::item:hover {
-                background-color: #353535;
-            }
-            QScrollBar:vertical {
-                background-color: #2b2b2b;
-                width: 12px;
-                margin: 0px;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #555555;
-                min-height: 20px;
-                border-radius: 6px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QSplitter::handle {
-                background-color: #555555;
-            }
-        """)
-        
-        # 创建中央窗口部件
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
-        # 创建主布局
-        main_layout = QHBoxLayout(central_widget)
-        
-        # 创建左侧面板（历史列表）
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        
-        # 历史列表标题和搜索框
-        header_widget = QWidget()
-        header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        
-        history_label = QLabel("剪贴板历史")
-        history_label.setStyleSheet("""
-            font-size: 14px;
-            font-weight: bold;
-            padding: 5px;
-            color: #ffffff;
-        """)
-        header_layout.addWidget(history_label)
-        
-        # 添加搜索框
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("搜索历史记录...")
-        self.search_box.textChanged.connect(self.filter_history)
-        self.search_box.setStyleSheet("""
-            QLineEdit {
-                background-color: #3b3b3b;
-                border: 1px solid #555555;
-                border-radius: 3px;
-                padding: 5px;
-                color: #ffffff;
-            }
-            QLineEdit:focus {
-                border: 1px solid #666666;
-            }
-        """)
-        header_layout.addWidget(self.search_box)
-        left_layout.addWidget(header_widget)
-        
-        # 历史列表
-        self.history_list = QListWidget()
-        self.history_list.itemClicked.connect(self.on_history_item_clicked)
-        self.history_list.itemDoubleClicked.connect(self.on_history_item_double_clicked)
-        left_layout.addWidget(self.history_list)
-        
-        # 创建右侧面板
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        
-        # 状态和设置面板
-        top_panel = QWidget()
-        top_layout = QHBoxLayout(top_panel)
-        
-        # 状态标签
-        self.status_label = QLabel("未连接到MQTT服务器")
-        self.status_label.setStyleSheet("color: #ffffff;")
-        top_layout.addWidget(self.status_label)
-        
-        # 设置按钮
-        settings_btn = QPushButton("设置")
-        settings_btn.clicked.connect(self.show_settings)
-        settings_btn.setFixedWidth(100)
-        top_layout.addWidget(settings_btn)
-        
-        right_layout.addWidget(top_panel)
-        
-        # 预览区域标题
-        preview_label = QLabel("当前内容预览")
-        preview_label.setStyleSheet("""
-            font-size: 14px;
-            font-weight: bold;
-            padding: 5px;
-            color: #ffffff;
-        """)
-        right_layout.addWidget(preview_label)
-        
-        # 创建堆叠窗口部件用于切换不同类型的预览
-        self.preview_stack = QStackedWidget()
-        
-        # 创建图片预览标签
-        self.image_preview = QLabel()
-        self.image_preview.setAlignment(Qt.AlignCenter)
-        self.image_preview.setMinimumSize(400, 300)
-        self.image_preview.setStyleSheet("""
-            background-color: #1e1e1e;
-            border: 1px solid #555555;
-            color: #888888;
-            border-radius: 4px;
-        """)
-        
-        # 创建文本预览编辑框
-        self.text_preview = QTextEdit()
-        self.text_preview.setReadOnly(True)
-        self.text_preview.setMinimumSize(400, 300)
-        self.text_preview.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                border: 1px solid #555555;
-                color: #ffffff;
-                font-family: "Menlo", monospace;
-                font-size: 13px;
-                padding: 10px;
-                border-radius: 4px;
-            }
-            QTextEdit:focus {
-                border: 1px solid #666666;
-            }
-        """)
-        self.text_preview.setPlaceholderText("暂无预览内容")
-        
-        # 将两种预览部件添加到堆叠窗口
-        self.preview_stack.addWidget(self.image_preview)  # index 0
-        self.preview_stack.addWidget(self.text_preview)   # index 1
-        
-        right_layout.addWidget(self.preview_stack)
-        
-        # 添加分割器
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 1)  # 左侧面板
-        splitter.setStretchFactor(1, 2)  # 右侧面板
-        
-        main_layout.addWidget(splitter)
-        
-        # 初始化系统托盘
-        self.setup_tray()
 
     def update_preview(self, content_type: str, content):
         """更新预览区域"""
@@ -501,7 +338,7 @@ class MainWindow(QMainWindow):
             print(f"更新预览时出错: {str(e)}")
             import traceback
             traceback.print_exc()
-
+            
     def on_history_item_clicked(self, item):
         """处理历史记录项的单击事件"""
         if not hasattr(item, 'clipboard_item'):
@@ -938,7 +775,7 @@ class MainWindow(QMainWindow):
                 self.mqtt_client.loop_stop()
                 
             # 移除 macOS 观察者
-            if self.is_macos and self.macos_modules_available:
+            if self.is_macos and MACOS_MODULES_AVAILABLE and self.macos_modules_available:
                 NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_(self.observer)
                 print("移除 NSPasteboard 观察者")
                 
@@ -1032,6 +869,21 @@ class MainWindow(QMainWindow):
             config = load_config()
             mqtt_config = config.get('mqtt', {})
             
+            # 检查必要的配置项
+            if not mqtt_config:
+                print("未找到MQTT配置，跳过MQTT连接")
+                self.status_label.setText("未配置MQTT，仅本地模式")
+                return
+                
+            host = mqtt_config.get('host')
+            port = mqtt_config.get('port')
+            if not host or not port:
+                print("MQTT主机或端口未配置，跳过MQTT连接")
+                self.status_label.setText("未配置MQTT，仅本地模式")
+                return
+            
+            print(f"正在配置MQTT连接 - 主机: {host}, 端口: {port}")
+            
             if self.mqtt_client:
                 try:
                     self.mqtt_client.disconnect()
@@ -1063,11 +915,12 @@ class MainWindow(QMainWindow):
             self.mqtt_client.on_publish = on_publish
             self.mqtt_client.on_log = on_log
             
-            if mqtt_config.get('username'):
-                self.mqtt_client.username_pw_set(
-                    mqtt_config['username'],
-                    mqtt_config.get('password', '')
-                )
+            # 设置认证信息
+            username = mqtt_config.get('username')
+            password = mqtt_config.get('password')
+            if username:
+                print(f"使用用户名认证: {username}")
+                self.mqtt_client.username_pw_set(username, password or '')
             
             # 设置回调函数
             self.mqtt_client.on_connect = self.on_connect
@@ -1086,69 +939,309 @@ class MainWindow(QMainWindow):
             })
             self.mqtt_client.will_set(will_topic, will_payload, qos=1, retain=True)
             
-            host = mqtt_config.get('host', 'localhost')
-            port = mqtt_config.get('port', 1883)
             print(f"正在连接到MQTT服务器: {host}:{port}")
+            self.status_label.setText(f"正在连接到MQTT服务器...")
             
-            self.mqtt_client.connect(host, port, keepalive)
-            self.mqtt_client.loop_start()
+            try:
+                # 设置连接选项
+                connect_properties = mqtt.Properties(PacketTypes.CONNECT)
+                connect_properties.SessionExpiryInterval = 7200  # 2小时会话过期
+                
+                self.mqtt_client.connect(host, port, keepalive, properties=connect_properties)
+                self.mqtt_client.loop_start()
+                
+                # 启用剪贴板监听
+                QTimer.singleShot(100, self.enable_clipboard_monitoring)
+                
+            except Exception as e:
+                print(f"MQTT连接失败: {str(e)}")
+                self.status_label.setText(f"MQTT连接失败: {str(e)}")
+                
+                # 仍然启用剪贴板监听，但仅本地模式
+                QTimer.singleShot(100, self.enable_clipboard_monitoring)
+                return
             
         except Exception as e:
             error_msg = f"MQTT连接失败: {str(e)}"
             print(error_msg)
             self.status_label.setText(error_msg)
+            
+            # 仍然启用剪贴板监听，但仅本地模式
+            QTimer.singleShot(100, self.enable_clipboard_monitoring)
+            
+            # 启动重连定时器
             if not self.reconnect_timer.isActive():
                 self.reconnect_timer.moveToThread(QApplication.instance().thread())
-                self.reconnect_timer.start()
-
+                QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+                
     def on_connect(self, client, userdata, flags, reason_code, properties):
         """MQTT v5 连接回调"""
         try:
-            print(f"MQTT连接状态: {reason_code}")
-            if reason_code == 0:
-                config = load_config()
-                topic_prefix = config['mqtt'].get('topic_prefix', 'copier/clipboard')
-                
-                # 发布在线状态
-                status_topic = f"{topic_prefix}/status"
-                status_payload = json.dumps({
-                    "client_id": self.client_id,
-                    "status": "online",
-                    "timestamp": int(time.time() * 1000)
-                })
-                self.mqtt_client.publish(status_topic, status_payload, qos=1, retain=True)
-                
-                # 订阅主题
-                print(f"正在订阅主题: {topic_prefix}/#")
-                result, mid = self.mqtt_client.subscribe(f"{topic_prefix}/#", qos=1)
-                print(f"订阅结果: {result}, mid: {mid}")
-                
-                self.status_label.setText("已连接到MQTT服务器")
-                self.mqtt_connected = True
-                
-                # 连接成功后再启用剪贴板监听
-                self.clipboard_monitoring_enabled = True
-                print("启用剪贴板监听")
-                
-                if self.reconnect_timer.isActive():
-                    self.reconnect_timer.stop()
-            else:
-                error_msg = f"连接失败，错误码：{reason_code}"
+            if reason_code.is_failure:
+                error_msg = f"MQTT连接失败 - {reason_code}"
                 print(error_msg)
                 self.status_label.setText(error_msg)
                 self.mqtt_connected = False
-                self.clipboard_monitoring_enabled = False
                 
                 if not self.reconnect_timer.isActive():
                     QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+                return
+                
+            print("MQTT连接成功")
+            self.mqtt_connected = True
+            self.status_label.setText("已连接到MQTT服务器")
+            
+            # 停止重连定时器
+            if self.reconnect_timer.isActive():
+                self.reconnect_timer.stop()
+            
+            # 订阅主题
+            config = load_config()
+            topic_prefix = config.get('mqtt', {}).get('topic_prefix', 'copier/clipboard')
+            topics = [
+                (f"{topic_prefix}/content", 1),  # QoS 1
+                (f"{topic_prefix}/status", 1)    # QoS 1
+            ]
+            
+            print(f"正在订阅主题: {topics}")
+            self.mqtt_client.subscribe(topics)
+            
+            # 发布在线状态
+            self.publish_status("online")
+            
+            # 启用剪贴板监听
+            QTimer.singleShot(100, self.enable_clipboard_monitoring)
+            
         except Exception as e:
             print(f"处理连接回调时出错: {str(e)}")
             self.mqtt_connected = False
-            self.clipboard_monitoring_enabled = False
             
             if not self.reconnect_timer.isActive():
                 QTimer.singleShot(0, lambda: self.reconnect_timer.start())
                 
+    def publish_status(self, status):
+        """发布客户端状态到MQTT服务器"""
+        if not self.mqtt_client or not self.mqtt_connected:
+            print(f"MQTT未连接，无法发布状态: {status}")
+            return
+            
+        try:
+            config = load_config()
+            topic_prefix = config.get('mqtt', {}).get('topic_prefix', 'copier/clipboard')
+            topic = f"{topic_prefix}/status"
+            
+            payload = {
+                "client_id": self.client_id,
+                "status": status,
+                "timestamp": int(time.time() * 1000)
+            }
+            
+            print(f"正在发布状态: {status}")
+            result = self.mqtt_client.publish(topic, json.dumps(payload), qos=1, retain=True)
+            print(f"状态发布结果: {result}")
+            
+        except Exception as e:
+            print(f"发布状态时出错: {str(e)}")
+
+    def setup_ui(self):
+        self.setWindowTitle(f"Copier v{self.VERSION}")
+        self.setMinimumSize(800, 600)
+        
+        # 设置应用程序样式
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2b2b2b;
+            }
+            QWidget {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QLabel {
+                color: #ffffff;
+            }
+            QPushButton {
+                background-color: #3b3b3b;
+                border: 1px solid #555555;
+                color: #ffffff;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #454545;
+            }
+            QListWidget {
+                background-color: #2b2b2b;
+                border: 1px solid #555555;
+                color: #ffffff;
+            }
+            QListWidget::item {
+                padding: 5px;
+            }
+            QListWidget::item:selected {
+                background-color: #3b3b3b;
+            }
+            QListWidget::item:hover {
+                background-color: #353535;
+            }
+            QScrollBar:vertical {
+                background-color: #2b2b2b;
+                width: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #555555;
+                min-height: 20px;
+                border-radius: 6px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QSplitter::handle {
+                background-color: #555555;
+            }
+        """)
+        
+        # 创建中央窗口部件
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # 创建主布局
+        main_layout = QHBoxLayout(central_widget)
+        
+        # 创建左侧面板（历史列表）
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        
+        # 历史列表标题和搜索框
+        header_widget = QWidget()
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        history_label = QLabel("剪贴板历史")
+        history_label.setStyleSheet("""
+            font-size: 14px;
+            font-weight: bold;
+            padding: 5px;
+            color: #ffffff;
+        """)
+        header_layout.addWidget(history_label)
+        
+        # 添加搜索框
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("搜索历史记录...")
+        self.search_box.textChanged.connect(self.filter_history)
+        self.search_box.setStyleSheet("""
+            QLineEdit {
+                background-color: #3b3b3b;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                color: #ffffff;
+            }
+            QLineEdit:focus {
+                border: 1px solid #666666;
+            }
+        """)
+        header_layout.addWidget(self.search_box)
+        left_layout.addWidget(header_widget)
+        
+        # 历史列表
+        self.history_list = QListWidget()
+        self.history_list.itemClicked.connect(self.on_history_item_clicked)
+        self.history_list.itemDoubleClicked.connect(self.on_history_item_double_clicked)
+        left_layout.addWidget(self.history_list)
+        
+        # 创建右侧面板
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        
+        # 状态和设置面板
+        top_panel = QWidget()
+        top_layout = QHBoxLayout(top_panel)
+        
+        # 状态标签
+        self.status_label = QLabel("未连接到MQTT服务器")
+        self.status_label.setStyleSheet("color: #ffffff;")
+        top_layout.addWidget(self.status_label)
+        
+        # 设置按钮
+        settings_btn = QPushButton("设置")
+        settings_btn.clicked.connect(self.show_settings)
+        settings_btn.setFixedWidth(100)
+        top_layout.addWidget(settings_btn)
+        
+        right_layout.addWidget(top_panel)
+        
+        # 预览区域标题
+        preview_label = QLabel("当前内容预览")
+        preview_label.setStyleSheet("""
+            font-size: 14px;
+            font-weight: bold;
+            padding: 5px;
+            color: #ffffff;
+        """)
+        right_layout.addWidget(preview_label)
+        
+        # 创建堆叠窗口部件用于切换不同类型的预览
+        self.preview_stack = QStackedWidget()
+        
+        # 创建图片预览标签
+        self.image_preview = QLabel()
+        self.image_preview.setAlignment(Qt.AlignCenter)
+        self.image_preview.setMinimumSize(400, 300)
+        self.image_preview.setStyleSheet("""
+            background-color: #1e1e1e;
+            border: 1px solid #555555;
+            color: #888888;
+            border-radius: 4px;
+        """)
+        
+        # 创建文本预览编辑框
+        self.text_preview = QTextEdit()
+        self.text_preview.setReadOnly(True)
+        self.text_preview.setMinimumSize(400, 300)
+        self.text_preview.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                border: 1px solid #555555;
+                color: #ffffff;
+                font-family: "Menlo", monospace;
+                font-size: 13px;
+                padding: 10px;
+                border-radius: 4px;
+            }
+            QTextEdit:focus {
+                border: 1px solid #666666;
+            }
+        """)
+        self.text_preview.setPlaceholderText("暂无预览内容")
+        
+        # 将两种预览部件添加到堆叠窗口
+        self.preview_stack.addWidget(self.image_preview)  # index 0
+        self.preview_stack.addWidget(self.text_preview)   # index 1
+        
+        right_layout.addWidget(self.preview_stack)
+        
+        # 添加分割器
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 1)  # 左侧面板
+        splitter.setStretchFactor(1, 2)  # 右侧面板
+        
+        main_layout.addWidget(splitter)
+        
+        # 初始化系统托盘
+        self.setup_tray()
+
+    def on_clipboard_change(self):
+        """剪贴板内容变化回调"""
+        if not self.clipboard_monitoring_enabled or self.is_receiving_content:
+            return
+            
+        # 使用防抖动延迟
+        self.clipboard_debounce_timer.start(100)
+
     def record_initial_clipboard_hash(self):
         """记录初始剪贴板内容的哈希值"""
         try:
@@ -1182,5 +1275,4 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
     sys.exit(app.exec())
