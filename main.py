@@ -71,6 +71,9 @@ class MainWindow(QMainWindow):
                 from AppKit import NSWorkspace
                 import Cocoa
                 self.macos_modules_available = True
+                print("成功导入 macOS 模块")
+                # 请求辅助功能权限
+                self.request_macos_accessibility()
             except ImportError as e:
                 print(f"无法导入 macOS 模块: {str(e)}")
                 print("将使用备用的定时轮询方案")
@@ -129,6 +132,8 @@ class MainWindow(QMainWindow):
             
             # 检查是否已经有权限
             trusted = Cocoa.AXIsProcessTrusted()
+            print(f"macOS 辅助功能权限状态: {trusted}")
+            
             if not trusted:
                 # 显示提示对话框
                 msg = QMessageBox()
@@ -149,6 +154,7 @@ class MainWindow(QMainWindow):
                     self.accessibility_check_timer = QTimer()
                     self.accessibility_check_timer.timeout.connect(self.check_accessibility)
                     self.accessibility_check_timer.start(1000)  # 每秒检查一次
+                    print("启动权限检查定时器")
                     
                     return False
             else:
@@ -170,6 +176,7 @@ class MainWindow(QMainWindow):
         try:
             import Cocoa
             trusted = Cocoa.AXIsProcessTrusted()
+            print(f"检查 macOS 辅助功能权限状态: {trusted}")
             
             if trusted:
                 self.macos_accessibility_enabled = True
