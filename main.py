@@ -974,6 +974,46 @@ class MainWindow(QMainWindow):
                 self.reconnect_timer.moveToThread(QApplication.instance().thread())
                 self.reconnect_timer.start()
 
+    def on_connect(self, client, userdata, flags, reason_code, properties):
+        """MQTT v5 连接回调"""
+        try:
+            print(f"MQTT连接回调 - reason_code: {reason_code}")
+            if reason_code == 0:
+                config = load_config()
+                topic_prefix = config['mqtt'].get('topic_prefix', 'copier/clipboard')
+                
+                # 发布在线状态
+                status_topic = f"{topic_prefix}/status"
+                status_payload = json.dumps({
+                    "client_id": self.client_id,
+                    "status": "online",
+                    "timestamp": int(time.time() * 1000)
+                })
+                self.mqtt_client.publish(status_topic, status_payload, qos=1, retain=True)
+                
+                # 订阅主题
+                print(f"正在订阅主题: {topic_prefix}/#")
+                result, mid = self.mqtt_client.subscribe(f"{topic_prefix}/#", qos=1)
+                print(f"订阅结果: {result}, mid: {mid}")
+                
+                self.status_label.setText("已连接到MQTT服务器")
+                self.mqtt_connected = True
+                
+                if self.reconnect_timer.isActive():
+                    self.reconnect_timer.stop()
+            else:
+                error_msg = f"连接失败，错误码：{reason_code}"
+                print(error_msg)
+                self.status_label.setText(error_msg)
+                self.mqtt_connected = False
+                if not self.reconnect_timer.isActive():
+                    QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+        except Exception as e:
+            print(f"处理连接回调时出错: {str(e)}")
+            self.mqtt_connected = False
+            if not self.reconnect_timer.isActive():
+                QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
