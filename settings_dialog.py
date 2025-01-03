@@ -9,6 +9,10 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("MQTT设置")
         self.setMinimumWidth(400)
+        
+        # 缓存当前配置
+        self.current_config = load_config()
+        
         self.setup_ui()
         self.load_settings()
 
@@ -62,8 +66,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(button_layout)
 
     def load_settings(self):
-        config = load_config()
-        mqtt_config = config.get('mqtt', {})
+        mqtt_config = self.current_config.get('mqtt', {})
         
         self.host_input.setText(mqtt_config.get('host', 'localhost'))
         self.port_input.setValue(mqtt_config.get('port', 1883))
@@ -74,22 +77,27 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         config = {
             'mqtt': {
-                'host': self.host_input.text(),
+                'host': self.host_input.text().strip(),
                 'port': self.port_input.value(),
-                'username': self.username_input.text(),
+                'username': self.username_input.text().strip(),
                 'password': self.password_input.text(),
-                'topic_prefix': self.topic_prefix_input.text()
+                'topic_prefix': self.topic_prefix_input.text().strip()
             }
         }
         
-        try:
-            save_config(config)
-            self.status_label.setStyleSheet("color: green;")
-            self.status_label.setText("设置已保存")
+        # 只有当配置确实发生变化时才保存
+        if config != self.current_config:
+            try:
+                save_config(config)
+                self.current_config = config
+                self.status_label.setStyleSheet("color: green;")
+                self.status_label.setText("设置已保存")
+                self.accept()
+            except Exception as e:
+                self.status_label.setStyleSheet("color: red;")
+                self.status_label.setText(f"保存失败: {str(e)}")
+        else:
             self.accept()
-        except Exception as e:
-            self.status_label.setStyleSheet("color: red;")
-            self.status_label.setText(f"保存失败: {str(e)}")
 
     def test_connection(self):
         import paho.mqtt.client as mqtt

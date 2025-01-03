@@ -1,3 +1,4 @@
+import platform
 import zstandard
 from PIL import Image
 import io
@@ -10,6 +11,7 @@ class DataProcessor:
     def __init__(self):
         self.compressor = zstandard.ZstdCompressor(level=3)  # 压缩级别1-22，数字越大压缩率越高但速度越慢
         self.decompressor = zstandard.ZstdDecompressor()
+        self.is_windows = platform.system().lower() == 'windows'
         
     def compress_data(self, data: bytes) -> bytes:
         """压缩二进制数据"""
@@ -26,6 +28,7 @@ class DataProcessor:
         buffer = QBuffer(byte_array)
         buffer.open(QBuffer.WriteOnly)
         qimage.save(buffer, "PNG")
+        buffer.close()
         
         # 使用PIL进行图片优化
         img_data = byte_array.data()
@@ -37,16 +40,23 @@ class DataProcessor:
             background.paste(pil_image, mask=pil_image.split()[3])
             pil_image = background
         
+        # 根据操作系统调整优化参数
+        if self.is_windows:
+            max_size = 1600  # Windows下使用较小的最大尺寸
+            quality = 70     # 降低图片质量以提高性能
+        else:
+            max_size = 1920  # macOS下保持原有设置
+            quality = 80
+        
         # 优化图片大小
-        max_size = 1920  # 最大尺寸
         if max(pil_image.size) > max_size:
             ratio = max_size / max(pil_image.size)
             new_size = tuple(int(dim * ratio) for dim in pil_image.size)
             pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
         
-        # 保存为WebP格式（更好的压缩率）
+        # 保存为WebP格式
         output = io.BytesIO()
-        pil_image.save(output, format='WebP', quality=80, optimize=True)
+        pil_image.save(output, format='WebP', quality=quality, optimize=True)
         return output.getvalue()
     
     def restore_image(self, image_data: bytes) -> QImage:

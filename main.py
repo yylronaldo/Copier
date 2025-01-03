@@ -16,6 +16,7 @@ import pyperclip
 from settings_dialog import SettingsDialog
 from config import load_config, save_config
 from data_processor import DataProcessor
+import platform
 
 class ClipboardItem:
     def __init__(self, content_type: str, content, timestamp: int):
@@ -52,6 +53,10 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        
+        # 添加操作系统判断
+        self.is_windows = platform.system().lower() == 'windows'
+        
         self.setWindowTitle(f"Copier v{self.VERSION}")
         self.setMinimumSize(800, 600)
         
@@ -115,10 +120,15 @@ class MainWindow(QMainWindow):
         # 初始化数据处理器
         self.data_processor = DataProcessor()
         
-        # 重连计时器
-        self.reconnect_timer = QTimer()
-        self.reconnect_timer.timeout.connect(self.setup_mqtt)
-        self.reconnect_timer.setInterval(5000)  # 5秒重连间隔
+        # 剪贴板
+        self.clipboard = QApplication.clipboard()
+        
+        # 上一次的剪贴板内容哈希
+        self.last_content_hash = None
+        
+        # 剪贴板历史
+        self.clipboard_history = []
+        self.max_history_size = 50  # 最多保存50条历史记录
         
         # 创建中央窗口部件
         central_widget = QWidget()
@@ -253,31 +263,30 @@ class MainWindow(QMainWindow):
         # 初始化系统托盘
         self.setup_tray()
         
-        # 初始化MQTT客户端
+        # 重连计时器
+        self.reconnect_timer = QTimer()
+        self.reconnect_timer.timeout.connect(self.setup_mqtt)
+        self.reconnect_timer.setInterval(5000 if not self.is_windows else 10000)  # Windows下增加重连间隔
+        # 确保定时器在主线程中运行
+        self.reconnect_timer.moveToThread(QApplication.instance().thread())
+        
+        # MQTT客户端
         self.mqtt_client = None
+        self.mqtt_connected = False
+        
+        # 初始化MQTT客户端
         self.setup_mqtt()
         
         # 设置窗口标志，允许在失去焦点时继续接收事件
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         
-        # 设置剪贴板监控
-        self.clipboard = QApplication.clipboard()
-        # self.clipboard.dataChanged.connect(self.on_clipboard_change)
-        
-        # 添加标志位控制剪贴板监听
-        self.clipboard_monitoring_enabled = True
-        
-        # 创建定时器以定期检查剪贴板
+        # 剪贴板监控定时器
         self.clipboard_timer = QTimer(self)
         self.clipboard_timer.timeout.connect(self.check_clipboard)
         self.clipboard_timer.start(500)  # 每500毫秒检查一次
         
-        # 上一次的剪贴板内容哈希
-        self.last_content_hash = None
-        
-        # 剪贴板历史
-        self.clipboard_history = []
-        self.max_history_size = 50  # 最多保存50条历史记录
+        # 添加标志位控制剪贴板监听
+        self.clipboard_monitoring_enabled = True
         
         # 设置快捷键
         self.setup_shortcuts()
@@ -459,44 +468,112 @@ class MainWindow(QMainWindow):
         """重新启用剪贴板监听"""
         self.clipboard_monitoring_enabled = True
 
-    def on_mqtt_message(self, client, userdata, msg):
+    def on_mqtt_message(self, client, userdata, message):
+        """MQTT v5 消息回调 (VERSION2 API)"""
         try:
-            data = json.loads(msg.payload.decode())
-            if data.get("source") != self.client_id:  # 避免自己发送的消息
-                content_type = data.get("type", "text")
-                compressed_content = base64.b64decode(data.get("content", ""))
-                timestamp = data.get("timestamp", int(time.time() * 1000))
+            if not self.mqtt_connected:
+                return
                 
-                if not compressed_content:
-                    return
+            payload = json.loads(message.payload)
+            if payload.get("source") == self.client_id:
+                return  # 忽略自己发送的消息
                 
-                # 计算内容哈希，避免重复处理
-                content_hash = self.calculate_content_hash(content_type, compressed_content)
-                if content_hash == self.last_content_hash:
-                    return
-                
-                self.last_content_hash = content_hash
-                
-                try:
-                    # 还原内容
-                    content = self.data_processor.restore_clipboard_data(
-                        content_type, compressed_content)
-                    
-                    # 更新预览和历史
-                    self.update_preview(content_type, content)
-                    self.add_to_history(content_type, content, timestamp)
-                    
-                    # 更新剪贴板
-                    if content_type == "text":
-                        self.clipboard.setText(content)
-                    else:  # image
-                        self.clipboard.setImage(content)
-                        
-                except Exception as e:
-                    print(f"还原{content_type}内容时出错: {str(e)}")
-                        
+            content_type = payload.get("type")
+            content = base64.b64decode(payload.get("content", ""))
+            
+            if content_type == "text":
+                self.process_received_text(content)
+            elif content_type == "image":
+                self.process_received_image(content)
+            else:
+                print(f"未知的内容类型: {content_type}")
         except Exception as e:
             print(f"处理消息时出错: {str(e)}")
+
+    def on_disconnect(self, client, userdata, reason_code, properties):
+        """MQTT v5 断开连接回调 (VERSION2 API)"""
+        reason = properties.get("reason_string", "未知原因") if properties else "未知原因"
+        self.status_label.setText(f"已断开连接 ({reason})，正在重试...")
+        self.mqtt_connected = False
+        
+        # 使用 singleShot 在主线程中启动重连定时器
+        if not self.reconnect_timer.isActive():
+            QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+
+    def setup_mqtt(self):
+        """设置MQTT连接"""
+        if self.mqtt_client and self.mqtt_connected:
+            return
+            
+        try:
+            config = load_config()
+            mqtt_config = config.get('mqtt', {})
+            
+            if self.mqtt_client:
+                try:
+                    self.mqtt_client.disconnect()
+                    self.mqtt_client.loop_stop()
+                except:
+                    pass
+            
+            # 使用 MQTT v5 客户端的新版本 API
+            client_options = mqtt.client.MQTTClientOptions(
+                protocol=mqtt.MQTTv5,
+                client_id=self.client_id
+            )
+            self.mqtt_client = mqtt.client.Client(client_options=client_options)
+            
+            if mqtt_config.get('username'):
+                self.mqtt_client.username_pw_set(
+                    mqtt_config['username'],
+                    mqtt_config.get('password', '')
+                )
+            
+            # 设置回调函数
+            callbacks = mqtt.client.CallbackAPIVersion.VERSION2
+            self.mqtt_client.callback_api_version = callbacks
+            self.mqtt_client.on_connect = self.on_connect
+            self.mqtt_client.on_disconnect = self.on_disconnect
+            self.mqtt_client.on_message = self.on_mqtt_message
+            
+            # 设置更长的保活时间，特别是在Windows上
+            keepalive = 60 if not self.is_windows else 120
+            self.mqtt_client.connect(
+                mqtt_config.get('host', 'localhost'),
+                mqtt_config.get('port', 1883),
+                keepalive=keepalive
+            )
+            
+            self.mqtt_client.loop_start()
+        except Exception as e:
+            self.status_label.setText(f"MQTT连接失败: {str(e)}")
+            # 使用 moveToThread 确保定时器在主线程中运行
+            if not self.reconnect_timer.isActive():
+                self.reconnect_timer.moveToThread(QApplication.instance().thread())
+                self.reconnect_timer.start()
+
+    def calculate_content_hash(self, content_type: str, content: bytes) -> str:
+        """计算内容的哈希值，用于去重"""
+        return f"{content_type}:{base64.b64encode(content).decode()[:32]}"
+
+    def send_clipboard_content(self, content_type: str, compressed_content: bytes):
+        if not self.mqtt_client or not self.mqtt_client.is_connected():
+            return
+            
+        try:
+            config = load_config()
+            topic_prefix = config['mqtt'].get('topic_prefix', 'copier/clipboard')
+            
+            # 使用base64编码压缩后的二进制数据
+            payload = {
+                "type": content_type,
+                "content": base64.b64encode(compressed_content).decode(),
+                "source": self.client_id,
+                "timestamp": int(time.time() * 1000)
+            }
+            self.mqtt_client.publish(topic_prefix, json.dumps(payload))
+        except Exception as e:
+            print(f"发送消息时出错: {str(e)}")
 
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -541,81 +618,6 @@ class MainWindow(QMainWindow):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.toggle_window()
 
-    def calculate_content_hash(self, content_type: str, content: bytes) -> str:
-        """计算内容的哈希值，用于去重"""
-        return f"{content_type}:{base64.b64encode(content).decode()[:32]}"
-
-    def send_clipboard_content(self, content_type: str, compressed_content: bytes):
-        if not self.mqtt_client or not self.mqtt_client.is_connected():
-            return
-            
-        try:
-            config = load_config()
-            topic_prefix = config['mqtt'].get('topic_prefix', 'copier/clipboard')
-            
-            # 使用base64编码压缩后的二进制数据
-            payload = {
-                "type": content_type,
-                "content": base64.b64encode(compressed_content).decode(),
-                "source": self.client_id,
-                "timestamp": int(time.time() * 1000)
-            }
-            self.mqtt_client.publish(topic_prefix, json.dumps(payload))
-        except Exception as e:
-            print(f"发送消息时出错: {str(e)}")
-
-    def setup_mqtt(self):
-        # 如果已有客户端，先停止之前的连接
-        if self.mqtt_client:
-            try:
-                self.mqtt_client.disconnect()
-                self.mqtt_client.loop_stop()
-            except:
-                pass
-        
-        config = load_config()
-        mqtt_config = config.get('mqtt', {})
-        
-        self.mqtt_client = mqtt.Client(client_id=self.client_id)
-        self.mqtt_client.on_connect = self.on_mqtt_connect
-        self.mqtt_client.on_message = self.on_mqtt_message
-        self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
-        
-        if mqtt_config.get('username'):
-            self.mqtt_client.username_pw_set(
-                mqtt_config['username'],
-                mqtt_config.get('password', '')
-            )
-        
-        try:
-            self.mqtt_client.connect(
-                mqtt_config.get('host', 'localhost'),
-                mqtt_config.get('port', 1883),
-                60
-            )
-            self.mqtt_client.loop_start()
-            self.reconnect_timer.stop()
-        except Exception as e:
-            self.status_label.setText(f"无法连接到MQTT服务器: {str(e)}")
-            if not self.reconnect_timer.isActive():
-                self.reconnect_timer.start()
-
-    def on_mqtt_connect(self, client, userdata, flags, rc):
-        if rc == 0:
-            config = load_config()
-            topic_prefix = config['mqtt'].get('topic_prefix', 'copier/clipboard')
-            self.status_label.setText("已连接到MQTT服务器")
-            self.mqtt_client.subscribe(f"{topic_prefix}/#")
-        else:
-            self.status_label.setText(f"连接失败，错误码：{rc}")
-            if not self.reconnect_timer.isActive():
-                self.reconnect_timer.start()
-
-    def on_mqtt_disconnect(self, client, userdata, rc):
-        self.status_label.setText("已断开连接，正在重试...")
-        if not self.reconnect_timer.isActive():
-            self.reconnect_timer.start()
-
     def show_settings(self):
         dialog = SettingsDialog(self)
         if dialog.exec() == SettingsDialog.Accepted:
@@ -623,33 +625,66 @@ class MainWindow(QMainWindow):
 
     def cleanup_and_quit(self):
         """清理并退出程序"""
-        self.clipboard_timer.stop()  # 停止剪贴板检查定时器
-        if self.mqtt_client:
-            self.mqtt_client.disconnect()
-        QApplication.quit()
+        try:
+            # 停止所有定时器
+            if hasattr(self, 'clipboard_timer'):
+                self.clipboard_timer.stop()
+            if hasattr(self, 'reconnect_timer') and self.reconnect_timer.isActive():
+                self.reconnect_timer.stop()
+            
+            # 断开MQTT连接
+            if hasattr(self, 'mqtt_client') and self.mqtt_client:
+                try:
+                    self.mqtt_client.disconnect()
+                    self.mqtt_client.loop_stop()
+                except:
+                    pass
+            
+            # 清理系统托盘
+            if hasattr(self, 'tray_icon'):
+                self.tray_icon.hide()
+                self.tray_icon.deleteLater()
+            
+            # 使用 singleShot 确保在主线程中退出
+            QTimer.singleShot(0, QApplication.quit)
+        except Exception as e:
+            print(f"清理资源时出错: {str(e)}")
+            QApplication.quit()
 
     def closeEvent(self, event):
-        """重写关闭事件，使其最小化到托盘而不是退出"""
-        event.ignore()
-        self.hide()
-
-    def add_to_history(self, content_type: str, content, timestamp: int):
-        """添加内容到历史记录"""
-        # 创建新的历史记录项
-        clipboard_item = ClipboardItem(content_type, content, timestamp)
-        list_item = QListWidgetItem()
-        list_item.clipboard_item = clipboard_item
-        
-        # 设置文本和样式
-        self.update_list_item(list_item)
-        
-        # 将新项添加到列表开头
-        self.history_list.insertItem(0, list_item)
-        
-        # 如果超过最大历史记录数，删除最后一项
-        while self.history_list.count() > self.max_history_size:
-            self.history_list.takeItem(self.history_list.count() - 1)
-
+        """处理窗口关闭事件"""
+        try:
+            # 停止所有定时器
+            if hasattr(self, 'clipboard_timer'):
+                self.clipboard_timer.stop()
+            if hasattr(self, 'reconnect_timer') and self.reconnect_timer.isActive():
+                self.reconnect_timer.stop()
+            
+            # 断开MQTT连接
+            if hasattr(self, 'mqtt_client') and self.mqtt_client and self.mqtt_connected:
+                try:
+                    self.mqtt_client.disconnect()
+                    self.mqtt_client.loop_stop()
+                except:
+                    pass
+                
+            # 清理资源
+            if hasattr(self, 'history_list'):
+                self.history_list.clear()
+            if hasattr(self, 'text_preview'):
+                self.text_preview.clear()
+            
+            # 清理系统托盘
+            if hasattr(self, 'tray_icon'):
+                self.tray_icon.hide()
+                self.tray_icon.deleteLater()
+            
+            # 接受关闭事件
+            event.accept()
+        except Exception as e:
+            print(f"关闭窗口时出错: {str(e)}")
+            event.accept()
+    
     def setup_shortcuts(self):
         """设置快捷键"""
         # Ctrl+F 聚焦搜索框
@@ -700,6 +735,89 @@ class MainWindow(QMainWindow):
                 item.setHidden(text not in content)
             else:  # image
                 item.setHidden(bool(text) and text != "图片")
+
+    def add_to_history(self, content_type: str, content, timestamp: int):
+        """添加内容到历史记录"""
+        # 创建新的历史记录项
+        clipboard_item = ClipboardItem(content_type, content, timestamp)
+        list_item = QListWidgetItem()
+        list_item.clipboard_item = clipboard_item
+        
+        # 设置文本和样式
+        self.update_list_item(list_item)
+        
+        # 将新项添加到列表开头
+        self.history_list.insertItem(0, list_item)
+        
+        # 如果超过最大历史记录数，删除最后一项
+        while self.history_list.count() > self.max_history_size:
+            self.history_list.takeItem(self.history_list.count() - 1)
+
+    def on_connect(self, client, userdata, flags, reason_code, properties):
+        """MQTT v5 连接回调 (VERSION2 API)"""
+        if reason_code == 0:
+            config = load_config()
+            topic_prefix = config['mqtt'].get('topic_prefix', 'copier/clipboard')
+            self.status_label.setText("已连接到MQTT服务器")
+            self.mqtt_connected = True
+            
+            # 使用 MQTT v5 的订阅选项
+            subscribe_options = mqtt.client.SubscribeOptions(qos=1)
+            self.mqtt_client.subscribe(f"{topic_prefix}/#", options=subscribe_options)
+            
+            # 连接成功后停止重连定时器
+            if self.reconnect_timer.isActive():
+                self.reconnect_timer.stop()
+        else:
+            self.status_label.setText(f"连接失败，错误码：{reason_code}")
+            self.mqtt_connected = False
+            # 使用 singleShot 在主线程中启动重连定时器
+            if not self.reconnect_timer.isActive():
+                QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+
+    def process_received_text(self, content):
+        """处理接收到的文本内容"""
+        try:
+            # 还原内容
+            text_content = self.data_processor.restore_clipboard_data("text", content)
+            
+            # 计算内容哈希，避免重复处理
+            content_hash = self.calculate_content_hash("text", content)
+            if content_hash == self.last_content_hash:
+                return
+                
+            self.last_content_hash = content_hash
+            
+            # 更新预览和历史
+            self.update_preview("text", text_content)
+            self.add_to_history("text", text_content, int(time.time() * 1000))
+            
+            # 更新剪贴板
+            self.clipboard.setText(text_content)
+        except Exception as e:
+            print(f"处理文本内容时出错: {str(e)}")
+
+    def process_received_image(self, content):
+        """处理接收到的图片内容"""
+        try:
+            # 还原内容
+            image_content = self.data_processor.restore_clipboard_data("image", content)
+            
+            # 计算内容哈希，避免重复处理
+            content_hash = self.calculate_content_hash("image", content)
+            if content_hash == self.last_content_hash:
+                return
+                
+            self.last_content_hash = content_hash
+            
+            # 更新预览和历史
+            self.update_preview("image", image_content)
+            self.add_to_history("image", image_content, int(time.time() * 1000))
+            
+            # 更新剪贴板
+            self.clipboard.setImage(image_content)
+        except Exception as e:
+            print(f"处理图片内容时出错: {str(e)}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
