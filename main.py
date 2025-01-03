@@ -61,19 +61,20 @@ class MainWindow(QMainWindow):
         self.is_windows = platform.system().lower() == 'windows'
         self.is_macos = platform.system().lower() == 'darwin'
         
-        # 在 macOS 上尝试使用辅助功能权限
+        # 在 macOS 上尝试使用 NSPasteboard
         if self.is_macos:
-            self.macos_accessibility_enabled = False
             self.macos_modules_available = False
             try:
                 # 尝试导入 macOS 特定的模块
-                from Foundation import NSString
-                from AppKit import NSWorkspace
+                from Foundation import NSString, NSPasteboard
+                from AppKit import NSWorkspace, NSPasteboardTypeString
                 import Cocoa
                 self.macos_modules_available = True
                 print("成功导入 macOS 模块")
-                # 请求辅助功能权限
-                self.request_macos_accessibility()
+                # 初始化 NSPasteboard
+                self.pasteboard = NSPasteboard.generalPasteboard()
+                self.last_change_count = self.pasteboard.changeCount()
+                print(f"初始化 NSPasteboard，当前变化计数：{self.last_change_count}")
             except ImportError as e:
                 print(f"无法导入 macOS 模块: {str(e)}")
                 print("将使用备用的定时轮询方案")
@@ -122,87 +123,46 @@ class MainWindow(QMainWindow):
         # 记录初始剪贴板内容的哈希
         self.record_initial_clipboard_hash()
 
-    def request_macos_accessibility(self):
-        """请求 macOS 辅助功能权限"""
-        if not self.is_macos or not self.macos_modules_available:
-            return True
-            
-        try:
-            import Cocoa
-            
-            # 检查是否已经有权限
-            trusted = Cocoa.AXIsProcessTrusted()
-            print(f"macOS 辅助功能权限状态: {trusted}")
-            
-            if not trusted:
-                # 显示提示对话框
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Information)
-                msg.setWindowTitle("需要辅助功能权限")
-                msg.setText("Copier 需要辅助功能权限来监听剪贴板变化。")
-                msg.setInformativeText("请在即将打开的系统偏好设置中，将 Copier 添加到辅助功能列表并启用。")
-                msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-                
-                if msg.exec_() == QMessageBox.Ok:
-                    # 打开系统偏好设置的安全性与隐私
-                    workspace = NSWorkspace.sharedWorkspace()
-                    workspace.openFile_(
-                        "/System/Library/PreferencePanes/Security.prefPane"
-                    )
-                    
-                    # 启动权限检查定时器
-                    self.accessibility_check_timer = QTimer()
-                    self.accessibility_check_timer.timeout.connect(self.check_accessibility)
-                    self.accessibility_check_timer.start(1000)  # 每秒检查一次
-                    print("启动权限检查定时器")
-                    
-                    return False
-            else:
-                self.macos_accessibility_enabled = True
-                print("已获得 macOS 辅助功能权限")
-                return True
-                
-        except Exception as e:
-            print(f"请求 macOS 辅助功能权限时出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def check_accessibility(self):
-        """检查 macOS 辅助功能权限状态"""
-        if not self.is_macos or not self.macos_modules_available:
+    def check_clipboard(self):
+        """检查剪贴板内容是否发生变化"""
+        if not self.clipboard_monitoring_enabled or self.is_receiving_content:
             return
             
         try:
-            import Cocoa
-            trusted = Cocoa.AXIsProcessTrusted()
-            print(f"检查 macOS 辅助功能权限状态: {trusted}")
-            
-            if trusted:
-                self.macos_accessibility_enabled = True
-                print("已获得 macOS 辅助功能权限")
-                self.accessibility_check_timer.stop()
+            # 在 macOS 上使用 NSPasteboard 检查变化
+            if self.is_macos and self.macos_modules_available:
+                current_count = self.pasteboard.changeCount()
+                if current_count == self.last_change_count:
+                    return
+                self.last_change_count = current_count
+                print(f"检测到剪贴板变化，新的计数：{current_count}")
                 
-                # 如果 MQTT 已连接，启用剪贴板监听
-                if self.mqtt_connected:
-                    self.clipboard_monitoring_enabled = True
-                    print("启用剪贴板监听")
+            mime = self.clipboard.mimeData()
+            
+            if mime.hasImage():
+                image = QImage(mime.imageData())
+                if not image.isNull():
+                    # 处理图片...
+                    self.process_image(image)
+            elif mime.hasText():
+                text = mime.text()
+                if text:
+                    # 处理文本...
+                    self.process_text(text)
                     
         except Exception as e:
-            print(f"检查 macOS 辅助功能权限时出错: {str(e)}")
-            
+            print(f"检查剪贴板内容时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
     def on_clipboard_change(self):
         """剪贴板内容变化回调"""
         if not self.clipboard_monitoring_enabled or self.is_receiving_content:
             return
             
-        # 在 macOS 上检查权限
-        if self.is_macos and self.macos_modules_available and not self.macos_accessibility_enabled:
-            return
-            
         # 使用防抖动延迟
         self.clipboard_debounce_timer.start(100)
-        
+
     def setup_ui(self):
         self.setWindowTitle(f"Copier v{self.VERSION}")
         self.setMinimumSize(800, 600)
@@ -529,76 +489,59 @@ class MainWindow(QMainWindow):
             thumb = clipboard_item.content.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             item.setIcon(QIcon(QPixmap.fromImage(thumb)))
 
-    def check_clipboard(self):
-        """检查剪贴板内容是否发生变化"""
-        if not self.clipboard_monitoring_enabled or self.is_receiving_content:
+    def process_text(self, text):
+        """处理文本内容"""
+        if not text:
             return
             
-        try:
-            mime = self.clipboard.mimeData()
+        content_hash = self.calculate_content_hash("text", text.encode('utf-8'))
+        if content_hash not in self.sent_hashes and content_hash not in self.received_hashes:
+            print(f"检测到新的文本内容，哈希值: {content_hash}")
+            self.sent_hashes.add(content_hash)
             
-            if mime.hasImage():
-                image = mime.imageData()
-                if not image:
-                    return
-                    
-                # 计算图片哈希值
-                buffer = QByteArray()
-                buffer_device = QBuffer(buffer)
-                buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
-                image.save(buffer_device, "PNG", 100)  # 使用最高质量保存
-                buffer_device.close()
-                image_bytes = buffer.data()
-                content_hash = self.calculate_content_hash("image", image_bytes)
-                
-                if content_hash not in self.sent_hashes and content_hash not in self.received_hashes:
-                    print(f"检测到新的图片内容，哈希值: {content_hash}")
-                    self.sent_hashes.add(content_hash)
-                    
-                    # 压缩图片
-                    _, compressed = self.data_processor.process_clipboard_data(
-                        "image", image)
-                    
-                    # 更新预览和历史
-                    self.update_preview("image", image)
-                    self.add_to_history("image", image, int(time.time() * 1000))
-                    
-                    # 发送到其他设备
-                    self.send_clipboard_content("image", compressed)
-                else:
-                    print(f"忽略重复的图片内容，哈希值: {content_hash}")
-                    
-            elif mime.hasText():
-                text = mime.text()
-                if not text:
-                    return
-                    
-                content_hash = self.calculate_content_hash("text", text.encode('utf-8'))
-                if content_hash not in self.sent_hashes and content_hash not in self.received_hashes:
-                    print(f"检测到新的文本内容，哈希值: {content_hash}")
-                    self.sent_hashes.add(content_hash)
-                    
-                    # 压缩文本
-                    _, compressed = self.data_processor.process_clipboard_data(
-                        "text", text)
-                    
-                    # 更新预览和历史
-                    self.update_preview("text", text)
-                    self.add_to_history("text", text, int(time.time() * 1000))
-                    
-                    # 发送到其他设备
-                    self.send_clipboard_content("text", compressed)
-                else:
-                    print(f"忽略重复的文本内容，哈希值: {content_hash}")
-                    
-        except Exception as e:
-            print(f"检查剪贴板时出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            # 压缩文本
+            _, compressed = self.data_processor.process_clipboard_data(
+                "text", text)
+            
+            # 更新预览和历史
+            self.update_preview("text", text)
+            self.add_to_history("text", text, int(time.time() * 1000))
+            
+            # 发送到其他设备
+            self.send_clipboard_content("text", compressed)
+        else:
+            print(f"忽略重复的文本内容，哈希值: {content_hash}")
 
-    def enable_clipboard_monitoring(self):
-        """重新启用剪贴板监听"""
-        self.clipboard_monitoring_enabled = True
+    def process_image(self, image):
+        """处理图片内容"""
+        if image.isNull():
+            return
+            
+        # 计算图片哈希值
+        buffer = QByteArray()
+        buffer_device = QBuffer(buffer)
+        buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
+        image.save(buffer_device, "PNG", 100)  # 使用最高质量保存
+        buffer_device.close()
+        image_bytes = buffer.data()
+        content_hash = self.calculate_content_hash("image", image_bytes)
+        
+        if content_hash not in self.sent_hashes and content_hash not in self.received_hashes:
+            print(f"检测到新的图片内容，哈希值: {content_hash}")
+            self.sent_hashes.add(content_hash)
+            
+            # 压缩图片，传递 QImage 对象
+            _, compressed = self.data_processor.process_clipboard_data(
+                "image", image)
+            
+            # 更新预览和历史
+            self.update_preview("image", image)
+            self.add_to_history("image", image, int(time.time() * 1000))
+            
+            # 发送到其他设备
+            self.send_clipboard_content("image", compressed)
+        else:
+            print(f"忽略重复的图片内容，哈希值: {content_hash}")
 
     def on_mqtt_message(self, client, userdata, message):
         """MQTT v5 消息回调"""
@@ -1150,8 +1093,8 @@ class MainWindow(QMainWindow):
             mime = self.clipboard.mimeData()
             
             if mime.hasImage():
-                image = mime.imageData()
-                if image:
+                image = QImage(mime.imageData())
+                if not image.isNull():
                     buffer = QByteArray()
                     buffer_device = QBuffer(buffer)
                     buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)

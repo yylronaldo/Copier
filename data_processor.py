@@ -4,7 +4,7 @@ from PIL import Image
 import io
 import base64
 from PySide6.QtGui import QImage
-from PySide6.QtCore import QBuffer, QByteArray
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice
 import time
 
 class DataProcessor:
@@ -26,7 +26,7 @@ class DataProcessor:
         # 将QImage转换为bytes
         byte_array = QByteArray()
         buffer = QBuffer(byte_array)
-        buffer.open(QBuffer.WriteOnly)
+        buffer.open(QBuffer.OpenModeFlag.WriteOnly)  # 修复：使用正确的枚举值
         qimage.save(buffer, "PNG")
         buffer.close()
         
