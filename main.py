@@ -285,16 +285,17 @@ class MainWindow(QMainWindow):
         # 剪贴板监控定时器
         self.clipboard_timer = QTimer(self)
         self.clipboard_timer.timeout.connect(self.check_clipboard)
-        self.clipboard_timer.start(500)  # 每500毫秒检查一次
-        
-        # 添加标志位控制剪贴板监听
-        self.clipboard_monitoring_enabled = True
+        # 启动时先禁用剪贴板监听
+        self.clipboard_monitoring_enabled = False
         
         # 添加剪贴板变化延迟检查
         self.clipboard_check_timer = QTimer()
         self.clipboard_check_timer.setSingleShot(True)
         self.clipboard_check_timer.timeout.connect(self.check_clipboard)
         self.last_clipboard_change = 0
+        
+        # 记录初始剪贴板内容的哈希
+        self.record_initial_clipboard_hash()
         
         # 设置快捷键
         self.setup_shortcuts()
@@ -1021,6 +1022,10 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("已连接到MQTT服务器")
                 self.mqtt_connected = True
                 
+                # 连接成功后再启用剪贴板监听
+                self.clipboard_monitoring_enabled = True
+                print("启用剪贴板监听")
+                
                 if self.reconnect_timer.isActive():
                     self.reconnect_timer.stop()
             else:
@@ -1028,13 +1033,45 @@ class MainWindow(QMainWindow):
                 print(error_msg)
                 self.status_label.setText(error_msg)
                 self.mqtt_connected = False
+                self.clipboard_monitoring_enabled = False  # 连接失败时禁用监听
                 if not self.reconnect_timer.isActive():
                     QTimer.singleShot(0, lambda: self.reconnect_timer.start())
         except Exception as e:
             print(f"处理连接回调时出错: {str(e)}")
             self.mqtt_connected = False
+            self.clipboard_monitoring_enabled = False  # 出错时禁用监听
             if not self.reconnect_timer.isActive():
                 QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+
+    def record_initial_clipboard_hash(self):
+        """记录初始剪贴板内容的哈希值"""
+        try:
+            mime = self.clipboard.mimeData()
+            
+            if mime.hasImage():
+                image = mime.imageData()
+                if image:
+                    buffer = QByteArray()
+                    buffer_device = QBuffer(buffer)
+                    buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
+                    image.save(buffer_device, "PNG")
+                    buffer_device.close()
+                    image_bytes = buffer.data()
+                    content_hash = self.calculate_content_hash("image", image_bytes)
+                    self.sent_hashes.add(content_hash)
+                    self.received_hashes.add(content_hash)
+                    print("记录初始图片哈希值")
+                    
+            elif mime.hasText():
+                text = mime.text()
+                if text:
+                    content_hash = self.calculate_content_hash("text", text.encode('utf-8'))
+                    self.sent_hashes.add(content_hash)
+                    self.received_hashes.add(content_hash)
+                    print("记录初始文本哈希值")
+                    
+        except Exception as e:
+            print(f"记录初始剪贴板内容哈希值时出错: {str(e)}")
 
     def cleanup_hashes(self):
         """清理哈希值集合，防止内存无限增长"""
