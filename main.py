@@ -66,14 +66,19 @@ class MainWindow(QMainWindow):
         if self.is_macos:
             try:
                 # 尝试导入 macOS 特定的模块
+                import objc
                 from Foundation import NSString, NSPasteboard, NSObject
                 from AppKit import NSWorkspace, NSPasteboardTypeString
                 import Cocoa
                 
                 # 创建一个 NSObject 子类来监听剪贴板变化
                 class PasteboardObserver(NSObject):
-                    def init_(self, callback):
-                        self = super().init()
+                    def init(self):
+                        self = objc.super(PasteboardObserver, self).init()
+                        return self
+                        
+                    def initWithCallback_(self, callback):
+                        self = self.init()
                         if self is not None:
                             self.callback = callback
                         return self
@@ -88,7 +93,7 @@ class MainWindow(QMainWindow):
                 print(f"初始化 NSPasteboard，当前变化计数：{self.last_change_count}")
                 
                 # 创建并注册观察者
-                self.observer = PasteboardObserver.alloc().init_(self.check_clipboard)
+                self.observer = PasteboardObserver.alloc().initWithCallback_(self.check_clipboard)
                 NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
                     self.observer,
                     "pasteboardDidChange:",
@@ -98,8 +103,10 @@ class MainWindow(QMainWindow):
                 print("注册 NSPasteboard 观察者")
                 self.macos_modules_available = True
                 
-            except ImportError as e:
-                print(f"无法导入 macOS 模块: {str(e)}")
+            except Exception as e:
+                print(f"无法初始化 macOS 模块: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 self.macos_modules_available = False
         
         # 初始化数据处理器
