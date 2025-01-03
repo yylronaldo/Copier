@@ -61,10 +61,23 @@ class MainWindow(QMainWindow):
         self.is_windows = platform.system().lower() == 'windows'
         self.is_macos = platform.system().lower() == 'darwin'
         
-        # 在 macOS 上请求辅助功能权限
+        # 在 macOS 上尝试使用辅助功能权限
         if self.is_macos:
             self.macos_accessibility_enabled = False
-            self.request_macos_accessibility()
+            self.macos_modules_available = False
+            try:
+                # 尝试导入 macOS 特定的模块
+                from Foundation import NSString
+                from AppKit import NSWorkspace
+                import Cocoa
+                self.macos_modules_available = True
+            except ImportError as e:
+                print(f"无法导入 macOS 模块: {str(e)}")
+                print("将使用备用的定时轮询方案")
+                # 创建定时轮询
+                self.macos_poll_timer = QTimer()
+                self.macos_poll_timer.timeout.connect(self.check_clipboard)
+                self.macos_poll_timer.setInterval(500)  # 每500ms检查一次
         
         # 初始化数据处理器
         self.data_processor = DataProcessor()
@@ -108,13 +121,10 @@ class MainWindow(QMainWindow):
 
     def request_macos_accessibility(self):
         """请求 macOS 辅助功能权限"""
-        if not self.is_macos:
+        if not self.is_macos or not self.macos_modules_available:
             return True
             
         try:
-            # 动态导入 macOS 特定的模块
-            from Foundation import NSString
-            from AppKit import NSWorkspace
             import Cocoa
             
             # 检查是否已经有权限
@@ -154,7 +164,7 @@ class MainWindow(QMainWindow):
 
     def check_accessibility(self):
         """检查 macOS 辅助功能权限状态"""
-        if not self.is_macos:
+        if not self.is_macos or not self.macos_modules_available:
             return
             
         try:
@@ -180,7 +190,7 @@ class MainWindow(QMainWindow):
             return
             
         # 在 macOS 上检查权限
-        if self.is_macos and not self.macos_accessibility_enabled:
+        if self.is_macos and self.macos_modules_available and not self.macos_accessibility_enabled:
             return
             
         # 使用防抖动延迟
@@ -1095,6 +1105,11 @@ class MainWindow(QMainWindow):
                 self.clipboard_monitoring_enabled = True
                 print("启用剪贴板监听")
                 
+                # 在 macOS 上启动定时轮询（如果没有辅助功能权限）
+                if self.is_macos and not self.macos_modules_available:
+                    self.macos_poll_timer.start()
+                    print("启动 macOS 剪贴板轮询")
+                
                 if self.reconnect_timer.isActive():
                     self.reconnect_timer.stop()
             else:
@@ -1104,12 +1119,20 @@ class MainWindow(QMainWindow):
                 self.mqtt_connected = False
                 self.clipboard_monitoring_enabled = False
                 
+                # 停止 macOS 轮询
+                if self.is_macos and not self.macos_modules_available:
+                    self.macos_poll_timer.stop()
+                
                 if not self.reconnect_timer.isActive():
                     QTimer.singleShot(0, lambda: self.reconnect_timer.start())
         except Exception as e:
             print(f"处理连接回调时出错: {str(e)}")
             self.mqtt_connected = False
             self.clipboard_monitoring_enabled = False
+            
+            # 停止 macOS 轮询
+            if self.is_macos and not self.macos_modules_available:
+                self.macos_poll_timer.stop()
             
             if not self.reconnect_timer.isActive():
                 QTimer.singleShot(0, lambda: self.reconnect_timer.start())
