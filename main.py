@@ -699,7 +699,7 @@ class MainWindow(QMainWindow):
                 content = clipboard_item.content.lower()
                 item.setHidden(text not in content)
             else:  # image
-                item.setHidden(text and text != "图片")
+                item.setHidden(bool(text) and text != "图片")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
