@@ -309,6 +309,11 @@ class MainWindow(QMainWindow):
         self.is_receiving_content = False
         self.last_content_hash = None  # 用于跟踪接收到的内容
         self.last_sent_hash = None     # 用于跟踪发送的内容
+        self.received_hashes = set()   # 用于跟踪最近接收的内容哈希
+        self.sent_hashes = set()       # 用于跟踪最近发送的内容哈希
+        self.hash_cleanup_timer = QTimer()
+        self.hash_cleanup_timer.timeout.connect(self.cleanup_hashes)
+        self.hash_cleanup_timer.start(60000)  # 每分钟清理一次
 
     def update_preview(self, content_type: str, content):
         """更新预览区域"""
@@ -459,9 +464,9 @@ class MainWindow(QMainWindow):
                     return
                     
                 content_hash = self.calculate_content_hash("image", image)
-                if content_hash != self.last_sent_hash:
+                if content_hash not in self.sent_hashes:
                     print("检测到新的图片内容")
-                    self.last_sent_hash = content_hash
+                    self.sent_hashes.add(content_hash)
                     
                     # 压缩图片
                     _, compressed = self.data_processor.process_clipboard_data(
@@ -479,12 +484,10 @@ class MainWindow(QMainWindow):
                 if not text:
                     return
                     
-                content_hash = self.calculate_content_hash("text", 
-                    text.encode('utf-8'))
-                    
-                if content_hash != self.last_sent_hash:
+                content_hash = self.calculate_content_hash("text", text.encode('utf-8'))
+                if content_hash not in self.sent_hashes:
                     print("检测到新的文本内容")
-                    self.last_sent_hash = content_hash
+                    self.sent_hashes.add(content_hash)
                     
                     # 压缩文本
                     _, compressed = self.data_processor.process_clipboard_data(
@@ -588,7 +591,7 @@ class MainWindow(QMainWindow):
             
             # 计算内容哈希，避免重复处理
             content_hash = self.calculate_content_hash("image", content)
-            if content_hash == self.last_content_hash:
+            if content_hash in self.received_hashes:
                 print("忽略重复的图片内容")
                 return
                 
@@ -596,8 +599,8 @@ class MainWindow(QMainWindow):
             image_content = self.data_processor.restore_clipboard_data("image", content)
             print(f"还原后的图片大小: {image_content.size()}")
             
-            self.last_content_hash = content_hash
-            self.last_sent_hash = content_hash  # 同时更新发送哈希
+            self.received_hashes.add(content_hash)
+            self.sent_hashes.add(content_hash)  # 也添加到发送哈希中，避免重复发送
             
             # 更新预览和历史
             self.update_preview("image", image_content)
@@ -623,7 +626,7 @@ class MainWindow(QMainWindow):
             
             # 计算内容哈希，避免重复处理
             content_hash = self.calculate_content_hash("text", content)
-            if content_hash == self.last_content_hash:
+            if content_hash in self.received_hashes:
                 print("忽略重复的文本内容")
                 return
                 
@@ -631,8 +634,8 @@ class MainWindow(QMainWindow):
             text_content = self.data_processor.restore_clipboard_data("text", content)
             print(f"还原后的文本长度: {len(text_content)}")
             
-            self.last_content_hash = content_hash
-            self.last_sent_hash = content_hash  # 同时更新发送哈希
+            self.received_hashes.add(content_hash)
+            self.sent_hashes.add(content_hash)  # 也添加到发送哈希中，避免重复发送
             
             # 更新预览和历史
             self.update_preview("text", text_content)
@@ -1013,6 +1016,17 @@ class MainWindow(QMainWindow):
             self.mqtt_connected = False
             if not self.reconnect_timer.isActive():
                 QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+
+    def cleanup_hashes(self):
+        """清理哈希值集合，防止内存无限增长"""
+        try:
+            # 保留最近的50个哈希值
+            if len(self.received_hashes) > 50:
+                self.received_hashes = set(list(self.received_hashes)[-50:])
+            if len(self.sent_hashes) > 50:
+                self.sent_hashes = set(list(self.sent_hashes)[-50:])
+        except Exception as e:
+            print(f"清理哈希值时出错: {str(e)}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
