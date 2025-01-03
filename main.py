@@ -306,6 +306,8 @@ class MainWindow(QMainWindow):
         
         # 添加一个标志来跟踪是否正在接收内容
         self.is_receiving_content = False
+        self.last_content_hash = None  # 用于跟踪接收到的内容
+        self.last_sent_hash = None     # 用于跟踪发送的内容
 
     def update_preview(self, content_type: str, content):
         """更新预览区域"""
@@ -443,8 +445,8 @@ class MainWindow(QMainWindow):
             item.setIcon(QIcon(QPixmap.fromImage(thumb)))
 
     def check_clipboard(self):
-        """定期检查剪贴板内容"""
-        if not self.clipboard_monitoring_enabled:
+        """检查剪贴板内容是否发生变化"""
+        if not self.clipboard_monitoring_enabled or self.is_receiving_content:
             return
             
         try:
@@ -458,9 +460,9 @@ class MainWindow(QMainWindow):
                 content_hash = self.calculate_content_hash("image", 
                     image.constBits().asstring(image.byteCount()))
                     
-                if content_hash != self.last_content_hash:
+                if content_hash != self.last_sent_hash:
                     print("检测到新的图片内容")
-                    self.last_content_hash = content_hash
+                    self.last_sent_hash = content_hash
                     
                     # 压缩图片
                     _, compressed = self.data_processor.process_clipboard_data(
@@ -481,9 +483,9 @@ class MainWindow(QMainWindow):
                 content_hash = self.calculate_content_hash("text", 
                     text.encode('utf-8'))
                     
-                if content_hash != self.last_content_hash and not self.is_receiving_content:
+                if content_hash != self.last_sent_hash:
                     print("检测到新的文本内容")
-                    self.last_content_hash = content_hash
+                    self.last_sent_hash = content_hash
                     
                     # 压缩文本
                     _, compressed = self.data_processor.process_clipboard_data(
@@ -596,6 +598,7 @@ class MainWindow(QMainWindow):
                 return
                 
             self.last_content_hash = content_hash
+            self.last_sent_hash = content_hash  # 同时更新发送哈希
             
             # 更新预览和历史
             self.update_preview("text", text_content)
@@ -604,9 +607,6 @@ class MainWindow(QMainWindow):
             # 更新剪贴板
             print("更新剪贴板文本内容")
             self.clipboard.setText(text_content)
-            
-            # 延迟重置接收标志
-            QTimer.singleShot(1000, self.reset_receiving_flag)
             
         except Exception as e:
             print(f"处理文本内容时出错: {str(e)}")
@@ -633,6 +633,7 @@ class MainWindow(QMainWindow):
                 return
                 
             self.last_content_hash = content_hash
+            self.last_sent_hash = content_hash  # 同时更新发送哈希
             
             # 更新预览和历史
             self.update_preview("image", image_content)
@@ -642,9 +643,6 @@ class MainWindow(QMainWindow):
             print("更新剪贴板图片内容")
             self.clipboard.setImage(image_content)
             
-            # 延迟重置接收标志
-            QTimer.singleShot(1000, self.reset_receiving_flag)
-            
         except Exception as e:
             print(f"处理图片内容时出错: {str(e)}")
             import traceback
@@ -653,11 +651,7 @@ class MainWindow(QMainWindow):
             # 确保标志被重置
             self.is_receiving_content = False
             
-    def reset_receiving_flag(self):
-        """重置接收内容标志"""
-        self.is_receiving_content = False
-
-    def on_disconnect(self, client, userdata, reason_code, properties):
+    def on_disconnect(self, client, userdata, reason_code, properties=None, disconnect_flags=None):
         """MQTT v5 断开连接回调"""
         reason = properties.get("reason_string", "未知原因") if properties else "未知原因"
         self.status_label.setText(f"已断开连接 ({reason})，正在重试...")
