@@ -450,7 +450,7 @@ class MainWindow(QMainWindow):
                     self.last_content_hash = content_hash
                     
                     # 压缩图片
-                    compressed = self.data_processor.compress_clipboard_data(
+                    _, compressed = self.data_processor.process_clipboard_data(
                         "image", image)
                     
                     # 更新预览和历史
@@ -473,7 +473,7 @@ class MainWindow(QMainWindow):
                     self.last_content_hash = content_hash
                     
                     # 压缩文本
-                    compressed = self.data_processor.compress_clipboard_data(
+                    _, compressed = self.data_processor.process_clipboard_data(
                         "text", text)
                     
                     # 更新预览和历史
@@ -554,7 +554,7 @@ class MainWindow(QMainWindow):
         """处理接收到的文本内容"""
         try:
             # 还原内容
-            text_content = self.data_processor.restore_clipboard_data("text", content)
+            _, text_content = self.data_processor.process_clipboard_data("text", content, restore=True)
             print(f"还原后的文本长度: {len(text_content)}")
             
             # 计算内容哈希，避免重复处理
@@ -588,7 +588,7 @@ class MainWindow(QMainWindow):
         """处理接收到的图片内容"""
         try:
             # 还原内容
-            image_content = self.data_processor.restore_clipboard_data("image", content)
+            _, image_content = self.data_processor.process_clipboard_data("image", content, restore=True)
             print(f"还原后的图片大小: {image_content.size()}")
             
             # 计算内容哈希，避免重复处理
