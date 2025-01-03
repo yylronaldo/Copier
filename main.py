@@ -661,6 +661,10 @@ class MainWindow(QMainWindow):
             print(f"MQTT断开连接 - 原因: {reason}")
             self.status_label.setText(f"已断开连接 ({reason})，正在重试...")
             self.mqtt_connected = False
+            
+            # 使用 singleShot 在主线程中启动重连定时器
+            if not self.reconnect_timer.isActive():
+                QTimer.singleShot(0, lambda: self.reconnect_timer.start())
         except Exception as e:
             print(f"处理断开连接回调时出错: {str(e)}")
             self.mqtt_connected = False
@@ -892,39 +896,83 @@ class MainWindow(QMainWindow):
         while self.history_list.count() > self.max_history_size:
             self.history_list.takeItem(self.history_list.count() - 1)
 
-    def on_connect(self, client, userdata, flags, reason_code, properties):
-        """MQTT v5 连接回调"""
-        print(f"MQTT连接回调 - reason_code: {reason_code}")
-        if reason_code == 0:
-            config = load_config()
-            topic_prefix = config['mqtt'].get('topic_prefix', 'copier/clipboard')
+    def setup_mqtt(self):
+        """设置MQTT连接"""
+        if self.mqtt_client and self.mqtt_connected:
+            return
             
-            # 发布在线状态
-            status_topic = f"{topic_prefix}/status"
-            status_payload = json.dumps({
+        try:
+            config = load_config()
+            mqtt_config = config.get('mqtt', {})
+            
+            if self.mqtt_client:
+                try:
+                    self.mqtt_client.disconnect()
+                    self.mqtt_client.loop_stop()
+                except Exception as e:
+                    print(f"断开旧连接时出错: {str(e)}")
+            
+            # 使用新版本的 MQTT 客户端
+            self.mqtt_client = mqtt.Client(
+                client_id=self.client_id,
+                protocol=mqtt.MQTTv5,
+                callback_api_version=mqtt.CallbackAPIVersion.VERSION2
+            )
+            
+            # 启用调试日志
+            self.mqtt_client.enable_logger()
+            
+            # 添加额外的调试回调
+            def on_subscribe(client, userdata, mid, reason_codes_all, properties):
+                print(f"订阅结果 - mid: {mid}, reason_codes: {reason_codes_all}")
+                
+            def on_publish(client, userdata, mid, reason_code=None, properties=None):
+                print(f"消息已发布 - mid: {mid}, reason_code: {reason_code}")
+                
+            def on_log(client, userdata, level, buf):
+                print(f"MQTT日志: {buf}")
+                
+            self.mqtt_client.on_subscribe = on_subscribe
+            self.mqtt_client.on_publish = on_publish
+            self.mqtt_client.on_log = on_log
+            
+            if mqtt_config.get('username'):
+                self.mqtt_client.username_pw_set(
+                    mqtt_config['username'],
+                    mqtt_config.get('password', '')
+                )
+            
+            # 设置回调函数
+            self.mqtt_client.on_connect = self.on_connect
+            self.mqtt_client.on_disconnect = self.on_disconnect
+            self.mqtt_client.on_message = self.on_mqtt_message
+            
+            # 设置更长的保活时间，特别是在Windows上
+            keepalive = 60 if not self.is_windows else 120
+            
+            # 设置遗嘱消息
+            will_topic = f"{mqtt_config.get('topic_prefix', 'copier/clipboard')}/status"
+            will_payload = json.dumps({
                 "client_id": self.client_id,
-                "status": "online",
+                "status": "offline",
                 "timestamp": int(time.time() * 1000)
             })
-            self.mqtt_client.publish(status_topic, status_payload, qos=1, retain=True)
+            self.mqtt_client.will_set(will_topic, will_payload, qos=1, retain=True)
             
-            # 订阅主题
-            print(f"正在订阅主题: {topic_prefix}/#")
-            result, mid = self.mqtt_client.subscribe(f"{topic_prefix}/#", qos=1)
-            print(f"订阅结果: {result}, mid: {mid}")
+            host = mqtt_config.get('host', 'localhost')
+            port = mqtt_config.get('port', 1883)
+            print(f"正在连接到MQTT服务器: {host}:{port}")
             
-            self.status_label.setText("已连接到MQTT服务器")
-            self.mqtt_connected = True
+            self.mqtt_client.connect(host, port, keepalive)
+            self.mqtt_client.loop_start()
             
-            if self.reconnect_timer.isActive():
-                self.reconnect_timer.stop()
-        else:
-            error_msg = f"连接失败，错误码：{reason_code}"
+        except Exception as e:
+            error_msg = f"MQTT连接失败: {str(e)}"
             print(error_msg)
             self.status_label.setText(error_msg)
-            self.mqtt_connected = False
             if not self.reconnect_timer.isActive():
-                QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+                self.reconnect_timer.moveToThread(QApplication.instance().thread())
+                self.reconnect_timer.start()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
