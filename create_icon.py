@@ -56,8 +56,19 @@ def create_clipboard_sync_icon():
     ]
     draw.polygon(right_points, fill=arrow_color)
     
-    # 保存为ICO文件
-    image.save('icon.ico', format='ICO', sizes=[(256, 256)])
+    # 保存为不同尺寸的图标
+    sizes = [(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)]
+    icons = []
+    for size in sizes:
+        icons.append(image.resize(size, Image.Resampling.LANCZOS))
+    
+    # 保存为 PNG
+    image.save('icon.png', 'PNG')
+    
+    # 保存为 ICO（Windows）
+    icons[0].save('icon.ico', format='ICO', sizes=sizes)
+    
+    print("图标已创建：icon.png 和 icon.ico")
 
 if __name__ == '__main__':
     create_clipboard_sync_icon()

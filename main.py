@@ -200,67 +200,62 @@ class MainWindow(QMainWindow):
         print("启用剪贴板监听...")
         self.clipboard_monitoring_enabled = True
         
-        # 设置定时器检查剪贴板变化
-        print("设置剪贴板检查定时器...")
-        if not hasattr(self, 'clipboard_timer'):
-            self.clipboard_timer = QTimer()
-            self.clipboard_timer.timeout.connect(self.check_clipboard)
-        if not self.clipboard_timer.isActive():
-            self.clipboard_timer.start(1000)  # 每秒检查一次
-            print("剪贴板检查定时器已启动")
+        if self.is_macos and MACOS_MODULES_AVAILABLE:
+            # macOS 使用定时器检查剪贴板变化
+            print("设置剪贴板检查定时器...")
+            if not hasattr(self, 'clipboard_timer'):
+                self.clipboard_timer = QTimer()
+                self.clipboard_timer.timeout.connect(self.check_clipboard)
+            if not self.clipboard_timer.isActive():
+                self.clipboard_timer.start(1000)  # 每秒检查一次
+                print("剪贴板检查定时器已启动")
+        else:
+            # Windows 使用剪贴板变化信号
+            print("设置剪贴板变化信号...")
+            self.clipboard.dataChanged.connect(self.on_clipboard_change)
+            print("剪贴板变化信号已连接")
 
     def check_clipboard(self):
-        """检查剪贴板变化"""
+        """检查剪贴板变化（仅用于 macOS）"""
         if not self.clipboard_monitoring_enabled:
             return
         
+        if not self.is_macos or not MACOS_MODULES_AVAILABLE:
+            return
+            
         try:
-            if self.is_macos and self.macos_modules_available:
-                current_count = self.pasteboard.changeCount()
-                if current_count != self.last_change_count:
-                    print(f"检测到剪贴板变化：{self.last_change_count} -> {current_count}")
-                    self.last_change_count = current_count
+            current_count = self.pasteboard.changeCount()
+            if current_count != self.last_change_count:
+                print(f"检测到剪贴板变化：{self.last_change_count} -> {current_count}")
+                self.last_change_count = current_count
+                
+                # 获取剪贴板内容
+                if self.pasteboard.types():
+                    print(f"剪贴板类型: {self.pasteboard.types()}")
+                    # 检查是否有文本内容
+                    if "public.utf8-plain-text" in self.pasteboard.types():
+                        text = self.pasteboard.stringForType_("public.utf8-plain-text")
+                        if text:
+                            print(f"从 NSPasteboard 获取到文本，长度：{len(text)}")
+                            self.process_text(text)
+                            return
                     
-                    # 获取剪贴板内容
-                    if self.pasteboard.types():
-                        print(f"剪贴板类型: {self.pasteboard.types()}")
-                        # 检查是否有文本内容
-                        if "public.utf8-plain-text" in self.pasteboard.types():
-                            text = self.pasteboard.stringForType_("public.utf8-plain-text")
-                            if text:
-                                print(f"从 NSPasteboard 获取到文本，长度：{len(text)}")
-                                self.process_text(text)
+                    # 检查是否有图片内容
+                    image_types = ["public.png", "public.tiff", "public.jpeg"]
+                    for image_type in image_types:
+                        if image_type in self.pasteboard.types():
+                            image_data = self.pasteboard.dataForType_(image_type)
+                            if image_data:
+                                print(f"从 NSPasteboard 获取到图片")
+                                self.process_image(image_data)
                                 return
-                        
-                        # 检查是否有图片内容
-                        image_types = ["public.png", "public.tiff", "public.jpeg"]
-                        for image_type in image_types:
-                            if image_type in self.pasteboard.types():
-                                image_data = self.pasteboard.dataForType_(image_type)
-                                if image_data:
-                                    print(f"从 NSPasteboard 获取到图片，类型：{image_type}")
-                                    self.process_image(image_data)
-                                    return
-                    else:
-                        print("NSPasteboard 内容为空")
-            else:
-                # Windows 上使用 Qt 的剪贴板事件
-                mime = self.clipboard.mimeData()
-                if mime.hasText():
-                    text = mime.text()
-                    if text:
-                        print(f"从 Qt 剪贴板获取到文本，长度：{len(text)}")
-                        self.process_text(text)
-                elif mime.hasImage():
-                    image = mime.imageData()
-                    if image:
-                        print("从 Qt 剪贴板获取到图片")
-                        self.process_image(image)
+                else:
+                    print("NSPasteboard 内容为空")
         except Exception as e:
             print(f"检查剪贴板时出错: {e}")
             import traceback
             traceback.print_exc()
-
+            
     def update_preview(self, content_type: str, content):
         """更新预览区域"""
         try:
@@ -1235,13 +1230,28 @@ class MainWindow(QMainWindow):
         self.setup_tray()
 
     def on_clipboard_change(self):
-        """剪贴板内容变化回调"""
+        """剪贴板内容变化回调（用于 Windows）"""
         if not self.clipboard_monitoring_enabled or self.is_receiving_content:
             return
             
-        # 使用防抖动延迟
-        self.clipboard_debounce_timer.start(100)
-
+        try:
+            # Windows 上使用 Qt 的剪贴板事件
+            mime = self.clipboard.mimeData()
+            if mime.hasText():
+                text = mime.text()
+                if text:
+                    print(f"从 Qt 剪贴板获取到文本，长度：{len(text)}")
+                    self.process_text(text)
+            elif mime.hasImage():
+                image = mime.imageData()
+                if image:
+                    print("从 Qt 剪贴板获取到图片")
+                    self.process_image(image)
+        except Exception as e:
+            print(f"处理剪贴板变化时出错: {e}")
+            import traceback
+            traceback.print_exc()
+            
     def record_initial_clipboard_hash(self):
         """记录初始剪贴板内容的哈希值"""
         try:

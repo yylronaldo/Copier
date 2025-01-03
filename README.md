@@ -98,6 +98,27 @@ Copier 是一个基于 MQTT 的跨设备剪贴板同步工具，支持文本和�
 pyinstaller copier.spec
 ```
 
+### Windows 开发说明
+
+#### 构建 Windows 应用程序
+
+1. 生成图标：
+```bash
+python create_icon.py
+```
+
+2. 安装 PyInstaller：
+```bash
+pip install pyinstaller
+```
+
+3. 使用专用的 Windows spec 文件构建应用程序：
+```bash
+python -m PyInstaller copier.windows.spec
+```
+
+构建完成后，可执行文件会在 `dist` 目录中生成。双击 `Copier.exe` 即可运行程序。
+
 ### macOS 开发说明
 
 #### 解决 pip 证书问题
