@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QListWidget, QListWidgetItem, QSplitter,
                               QScrollArea, QTextEdit, QStackedWidget, QLineEdit,
                               QMessageBox)
-from PySide6.QtCore import Qt, QTimer, QBuffer, QByteArray, QSize, QRectF
+from PySide6.QtCore import (Qt, QTimer, QBuffer, QByteArray, QSize, QRectF,
+                           QMetaObject, Q_ARG)
 from PySide6.QtGui import (QIcon, QImage, QPixmap, QPainter, QFont, QPen, QBrush, 
                           QColor, QFontMetrics, QKeySequence, QShortcut)
 import base64
@@ -356,71 +357,81 @@ class MainWindow(QMainWindow):
 
     def update_preview(self, content_type: str, content):
         """更新预览区域"""
-        if content_type == "text":
-            self.preview_stack.setCurrentIndex(1)  # 切换到文本预览
-            self.text_preview.setText(content)
-        else:  # image
-            self.preview_stack.setCurrentIndex(0)  # 切换到图片预览
-            if isinstance(content, QImage):
-                pixmap = QPixmap.fromImage(content)
-            else:
-                pixmap = content
-            
-            # 计算缩放后的尺寸，保持宽高比
-            preview_size = self.image_preview.size()
-            scaled_pixmap = pixmap.scaled(preview_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            
-            # 创建一个新的QPixmap作为背景
-            final_pixmap = QPixmap(preview_size)
-            final_pixmap.fill(Qt.transparent)
-            
-            # 创建QPainter在新的QPixmap上绘制
-            painter = QPainter(final_pixmap)
-            
-            # 在中心绘制图片
-            x = (preview_size.width() - scaled_pixmap.width()) // 2
-            y = (preview_size.height() - scaled_pixmap.height()) // 2
-            painter.drawPixmap(x, y, scaled_pixmap)
-            
-            # 获取当前项的时间文本
-            current_item = self.history_list.currentItem()
-            if current_item and hasattr(current_item, 'clipboard_item'):
-                time_text = current_item.clipboard_item.get_time_text()
+        try:
+            if content_type == "text":
+                QMetaObject.invokeMethod(self.text_preview, "setPlainText",
+                                       Qt.ConnectionType.QueuedConnection,
+                                       Q_ARG(str, content))
+                self.preview_stack.setCurrentIndex(1)  # 切换到文本预览
+            else:  # image
+                if isinstance(content, QImage):
+                    pixmap = QPixmap.fromImage(content)
+                else:
+                    pixmap = content
                 
-                # 设置字体和颜色
-                font = painter.font()
-                font.setPointSize(10)
-                painter.setFont(font)
+                # 计算缩放后的尺寸，保持宽高比
+                preview_size = self.image_preview.size()
+                scaled_pixmap = pixmap.scaled(preview_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 
-                # 计算文本大小
-                font_metrics = painter.fontMetrics()
-                text_width = font_metrics.horizontalAdvance(time_text)
-                text_height = font_metrics.height()
+                # 创建一个新的QPixmap作为背景
+                final_pixmap = QPixmap(preview_size)
+                final_pixmap.fill(Qt.transparent)
                 
-                # 在右下角绘制半透明背景
-                padding = 5
-                bg_rect = QRectF(
-                    preview_size.width() - text_width - padding * 2,
-                    preview_size.height() - text_height - padding * 2,
-                    text_width + padding * 2,
-                    text_height + padding * 2
-                )
-                painter.setBrush(QColor(0, 0, 0, 128))
-                painter.setPen(Qt.NoPen)
-                painter.drawRoundedRect(bg_rect, 3, 3)
+                # 创建QPainter在新的QPixmap上绘制
+                painter = QPainter(final_pixmap)
                 
-                # 绘制时间文本
-                painter.setPen(Qt.white)
-                painter.drawText(
-                    preview_size.width() - text_width - padding,
-                    preview_size.height() - padding - font_metrics.descent(),
-                    time_text
-                )
-            
-            painter.end()
-            
-            # 设置最终的图片
-            self.image_preview.setPixmap(final_pixmap)
+                # 在中心绘制图片
+                x = (preview_size.width() - scaled_pixmap.width()) // 2
+                y = (preview_size.height() - scaled_pixmap.height()) // 2
+                painter.drawPixmap(x, y, scaled_pixmap)
+                
+                # 获取当前项的时间文本
+                current_item = self.history_list.currentItem()
+                if current_item and hasattr(current_item, 'clipboard_item'):
+                    time_text = current_item.clipboard_item.get_time_text()
+                    
+                    # 设置字体和颜色
+                    font = painter.font()
+                    font.setPointSize(10)
+                    painter.setFont(font)
+                    
+                    # 计算文本大小
+                    font_metrics = painter.fontMetrics()
+                    text_width = font_metrics.horizontalAdvance(time_text)
+                    text_height = font_metrics.height()
+                    
+                    # 在右下角绘制半透明背景
+                    padding = 5
+                    bg_rect = QRectF(
+                        preview_size.width() - text_width - padding * 2,
+                        preview_size.height() - text_height - padding * 2,
+                        text_width + padding * 2,
+                        text_height + padding * 2
+                    )
+                    painter.setBrush(QColor(0, 0, 0, 128))
+                    painter.setPen(Qt.NoPen)
+                    painter.drawRoundedRect(bg_rect, 3, 3)
+                    
+                    # 绘制时间文本
+                    painter.setPen(Qt.white)
+                    painter.drawText(
+                        preview_size.width() - text_width - padding,
+                        preview_size.height() - padding - font_metrics.descent(),
+                        time_text
+                    )
+                
+                painter.end()
+                
+                # 设置最终的图片
+                QMetaObject.invokeMethod(self.image_preview, "setPixmap",
+                                       Qt.ConnectionType.QueuedConnection,
+                                       Q_ARG(QPixmap, final_pixmap))
+                self.preview_stack.setCurrentIndex(0)  # 切换到图片预览
+                
+        except Exception as e:
+            print(f"更新预览时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def on_history_item_clicked(self, item):
         """处理历史记录项的单击事件"""
