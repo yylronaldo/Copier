@@ -469,7 +469,7 @@ class MainWindow(QMainWindow):
         self.clipboard_monitoring_enabled = True
 
     def on_mqtt_message(self, client, userdata, message):
-        """MQTT v5 消息回调 (VERSION2 API)"""
+        """MQTT v5 消息回调"""
         try:
             if not self.mqtt_connected:
                 return
@@ -491,7 +491,7 @@ class MainWindow(QMainWindow):
             print(f"处理消息时出错: {str(e)}")
 
     def on_disconnect(self, client, userdata, reason_code, properties):
-        """MQTT v5 断开连接回调 (VERSION2 API)"""
+        """MQTT v5 断开连接回调"""
         reason = properties.get("reason_string", "未知原因") if properties else "未知原因"
         self.status_label.setText(f"已断开连接 ({reason})，正在重试...")
         self.mqtt_connected = False
@@ -516,12 +516,13 @@ class MainWindow(QMainWindow):
                 except:
                     pass
             
-            # 使用 MQTT v5 客户端的新版本 API
-            client_options = mqtt.client.MQTTClientOptions(
+            # 使用新版本的 MQTT 客户端
+            self.mqtt_client = mqtt.Client(
+                client_id=self.client_id,
                 protocol=mqtt.MQTTv5,
-                client_id=self.client_id
+                callback_api_version=mqtt.CallbackAPIVersion.VERSION2
             )
-            self.mqtt_client = mqtt.client.Client(client_options=client_options)
+            self.mqtt_client.enable_logger()
             
             if mqtt_config.get('username'):
                 self.mqtt_client.username_pw_set(
@@ -530,8 +531,6 @@ class MainWindow(QMainWindow):
                 )
             
             # 设置回调函数
-            callbacks = mqtt.client.CallbackAPIVersion.VERSION2
-            self.mqtt_client.callback_api_version = callbacks
             self.mqtt_client.on_connect = self.on_connect
             self.mqtt_client.on_disconnect = self.on_disconnect
             self.mqtt_client.on_message = self.on_mqtt_message
@@ -547,7 +546,6 @@ class MainWindow(QMainWindow):
             self.mqtt_client.loop_start()
         except Exception as e:
             self.status_label.setText(f"MQTT连接失败: {str(e)}")
-            # 使用 moveToThread 确保定时器在主线程中运行
             if not self.reconnect_timer.isActive():
                 self.reconnect_timer.moveToThread(QApplication.instance().thread())
                 self.reconnect_timer.start()
@@ -754,7 +752,7 @@ class MainWindow(QMainWindow):
             self.history_list.takeItem(self.history_list.count() - 1)
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
-        """MQTT v5 连接回调 (VERSION2 API)"""
+        """MQTT v5 连接回调"""
         if reason_code == 0:
             config = load_config()
             topic_prefix = config['mqtt'].get('topic_prefix', 'copier/clipboard')
@@ -765,13 +763,11 @@ class MainWindow(QMainWindow):
             subscribe_options = mqtt.client.SubscribeOptions(qos=1)
             self.mqtt_client.subscribe(f"{topic_prefix}/#", options=subscribe_options)
             
-            # 连接成功后停止重连定时器
             if self.reconnect_timer.isActive():
                 self.reconnect_timer.stop()
         else:
             self.status_label.setText(f"连接失败，错误码：{reason_code}")
             self.mqtt_connected = False
-            # 使用 singleShot 在主线程中启动重连定时器
             if not self.reconnect_timer.isActive():
                 QTimer.singleShot(0, lambda: self.reconnect_timer.start())
 
