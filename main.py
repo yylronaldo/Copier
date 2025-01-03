@@ -6,7 +6,8 @@ import io
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QLabel, QSystemTrayIcon, QMenu, QPushButton,
                               QHBoxLayout, QListWidget, QListWidgetItem, QSplitter,
-                              QScrollArea, QTextEdit, QStackedWidget, QLineEdit)
+                              QScrollArea, QTextEdit, QStackedWidget, QLineEdit,
+                              QMessageBox)
 from PySide6.QtCore import Qt, QTimer, QBuffer, QByteArray, QSize, QRectF
 from PySide6.QtGui import (QIcon, QImage, QPixmap, QPainter, QFont, QPen, QBrush, 
                           QColor, QFontMetrics, QKeySequence, QShortcut)
@@ -58,6 +59,12 @@ class MainWindow(QMainWindow):
         
         # 添加操作系统判断
         self.is_windows = platform.system().lower() == 'windows'
+        self.is_macos = platform.system().lower() == 'darwin'
+        
+        # 在 macOS 上请求辅助功能权限
+        if self.is_macos:
+            self.macos_accessibility_enabled = False
+            self.request_macos_accessibility()
         
         # 初始化数据处理器
         self.data_processor = DataProcessor()
@@ -95,24 +102,89 @@ class MainWindow(QMainWindow):
         self.is_receiving_content = False
         self.received_hashes = set()   # 用于跟踪最近接收的内容哈希
         self.sent_hashes = set()       # 用于跟踪最近发送的内容哈希
-        self.hash_cleanup_timer = QTimer()
-        self.hash_cleanup_timer.timeout.connect(self.cleanup_hashes)
-        self.hash_cleanup_timer.start(60000)  # 每分钟清理一次
         
         # 记录初始剪贴板内容的哈希
         self.record_initial_clipboard_hash()
 
-        # 默认隐藏窗口，在系统托盘运行
-        self.hide()
-        
-        # 创建一个定时器用于在主线程中处理接收到的数据
-        self.process_timer = QTimer()
-        self.process_timer.timeout.connect(self.process_pending_data)
-        self.process_timer.start(100)  # 每100ms检查一次
-        
-        # 用于存储待处理的数据
-        self.pending_data = []
-        self.pending_data_lock = threading.Lock()
+    def request_macos_accessibility(self):
+        """请求 macOS 辅助功能权限"""
+        if not self.is_macos:
+            return True
+            
+        try:
+            # 动态导入 macOS 特定的模块
+            from Foundation import NSString
+            from AppKit import NSWorkspace
+            import Cocoa
+            
+            # 检查是否已经有权限
+            trusted = Cocoa.AXIsProcessTrusted()
+            if not trusted:
+                # 显示提示对话框
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Information)
+                msg.setWindowTitle("需要辅助功能权限")
+                msg.setText("Copier 需要辅助功能权限来监听剪贴板变化。")
+                msg.setInformativeText("请在即将打开的系统偏好设置中，将 Copier 添加到辅助功能列表并启用。")
+                msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+                
+                if msg.exec_() == QMessageBox.Ok:
+                    # 打开系统偏好设置的安全性与隐私
+                    workspace = NSWorkspace.sharedWorkspace()
+                    workspace.openFile_(
+                        "/System/Library/PreferencePanes/Security.prefPane"
+                    )
+                    
+                    # 启动权限检查定时器
+                    self.accessibility_check_timer = QTimer()
+                    self.accessibility_check_timer.timeout.connect(self.check_accessibility)
+                    self.accessibility_check_timer.start(1000)  # 每秒检查一次
+                    
+                    return False
+            else:
+                self.macos_accessibility_enabled = True
+                print("已获得 macOS 辅助功能权限")
+                return True
+                
+        except Exception as e:
+            print(f"请求 macOS 辅助功能权限时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def check_accessibility(self):
+        """检查 macOS 辅助功能权限状态"""
+        if not self.is_macos:
+            return
+            
+        try:
+            import Cocoa
+            trusted = Cocoa.AXIsProcessTrusted()
+            
+            if trusted:
+                self.macos_accessibility_enabled = True
+                print("已获得 macOS 辅助功能权限")
+                self.accessibility_check_timer.stop()
+                
+                # 如果 MQTT 已连接，启用剪贴板监听
+                if self.mqtt_connected:
+                    self.clipboard_monitoring_enabled = True
+                    print("启用剪贴板监听")
+                    
+        except Exception as e:
+            print(f"检查 macOS 辅助功能权限时出错: {str(e)}")
+            
+    def on_clipboard_change(self):
+        """剪贴板内容变化回调"""
+        if not self.clipboard_monitoring_enabled or self.is_receiving_content:
+            return
+            
+        # 在 macOS 上检查权限
+        if self.is_macos and not self.macos_accessibility_enabled:
+            return
+            
+        # 使用防抖动延迟
+        self.clipboard_debounce_timer.start(100)
         
     def setup_ui(self):
         self.setWindowTitle(f"Copier v{self.VERSION}")
@@ -440,14 +512,6 @@ class MainWindow(QMainWindow):
             thumb = clipboard_item.content.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             item.setIcon(QIcon(QPixmap.fromImage(thumb)))
 
-    def on_clipboard_change(self):
-        """剪贴板内容变化回调"""
-        if not self.clipboard_monitoring_enabled or self.is_receiving_content:
-            return
-        
-        # 使用100ms的防抖动延迟
-        self.clipboard_debounce_timer.start(100)
-
     def check_clipboard(self):
         """检查剪贴板内容是否发生变化"""
         if not self.clipboard_monitoring_enabled or self.is_receiving_content:
@@ -566,32 +630,24 @@ class MainWindow(QMainWindow):
             print(f"处理{content_type}类型的消息，大小: {len(content)}字节")
             
             # 将数据添加到待处理队列
-            with self.pending_data_lock:
-                self.pending_data.append((content_type, content))
+            self.process_received_data(content_type, content)
                 
         except Exception as e:
             print(f"处理消息时出错: {str(e)}")
             import traceback
             traceback.print_exc()
 
-    def process_pending_data(self):
-        """在主线程中处理待处理的数据"""
-        with self.pending_data_lock:
-            if not self.pending_data:
-                return
-                
-            data = self.pending_data.pop(0)
-            content_type, content = data
-            
-            try:
-                if content_type == "text":
-                    self.process_received_text(content)
-                elif content_type == "image":
-                    self.process_received_image(content)
-            except Exception as e:
-                print(f"处理数据时出错: {str(e)}")
-                import traceback
-                traceback.print_exc()
+    def process_received_data(self, content_type: str, content: bytes):
+        """处理接收到的数据"""
+        try:
+            if content_type == "text":
+                self.process_received_text(content)
+            elif content_type == "image":
+                self.process_received_image(content)
+        except Exception as e:
+            print(f"处理数据时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def process_received_image(self, content):
         """处理接收到的图片内容"""
@@ -812,8 +868,6 @@ class MainWindow(QMainWindow):
             # 停止所有定时器
             if hasattr(self, 'clipboard_debounce_timer'):
                 self.clipboard_debounce_timer.stop()
-            if hasattr(self, 'reconnect_timer') and self.reconnect_timer.isActive():
-                self.reconnect_timer.stop()
             
             # 断开MQTT连接
             if hasattr(self, 'mqtt_client') and self.mqtt_client:
@@ -840,8 +894,6 @@ class MainWindow(QMainWindow):
             # 停止所有定时器
             if hasattr(self, 'clipboard_debounce_timer'):
                 self.clipboard_debounce_timer.stop()
-            if hasattr(self, 'reconnect_timer') and self.reconnect_timer.isActive():
-                self.reconnect_timer.stop()
             
             # 断开MQTT连接
             if hasattr(self, 'mqtt_client') and self.mqtt_client and self.mqtt_connected:
@@ -1050,16 +1102,18 @@ class MainWindow(QMainWindow):
                 print(error_msg)
                 self.status_label.setText(error_msg)
                 self.mqtt_connected = False
-                self.clipboard_monitoring_enabled = False  # 连接失败时禁用监听
+                self.clipboard_monitoring_enabled = False
+                
                 if not self.reconnect_timer.isActive():
                     QTimer.singleShot(0, lambda: self.reconnect_timer.start())
         except Exception as e:
             print(f"处理连接回调时出错: {str(e)}")
             self.mqtt_connected = False
-            self.clipboard_monitoring_enabled = False  # 出错时禁用监听
+            self.clipboard_monitoring_enabled = False
+            
             if not self.reconnect_timer.isActive():
                 QTimer.singleShot(0, lambda: self.reconnect_timer.start())
-
+                
     def record_initial_clipboard_hash(self):
         """记录初始剪贴板内容的哈希值"""
         try:
@@ -1089,17 +1143,6 @@ class MainWindow(QMainWindow):
                     
         except Exception as e:
             print(f"记录初始剪贴板内容哈希值时出错: {str(e)}")
-
-    def cleanup_hashes(self):
-        """清理哈希值集合，防止内存无限增长"""
-        try:
-            max_hashes = 100  # 保留最近的100个哈希值
-            if len(self.received_hashes) > max_hashes:
-                self.received_hashes = set(sorted(list(self.received_hashes))[-max_hashes:])
-            if len(self.sent_hashes) > max_hashes:
-                self.sent_hashes = set(sorted(list(self.sent_hashes))[-max_hashes:])
-        except Exception as e:
-            print(f"清理哈希值时出错: {str(e)}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

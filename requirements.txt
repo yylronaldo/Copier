@@ -5,3 +5,5 @@ protobuf>=4.21.0
 Pillow>=9.0.0
 zstandard>=0.21.0
 pyinstaller>=5.13.0
+pyobjc-core>=9.2; sys_platform == 'darwin'  # 仅在 macOS 上安装
+pyobjc-framework-Cocoa>=9.2; sys_platform == 'darwin'  # 仅在 macOS 上安装
