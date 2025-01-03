@@ -98,6 +98,44 @@ Copier 是一个基于 MQTT 的跨设备剪贴板同步工具，支持文本和�
 pyinstaller copier.spec
 ```
 
+### macOS 开发说明
+
+#### 解决 pip 证书问题
+
+如果在使用 pip 时遇到证书问题，可以通过以下步骤解决：
+
+1. 创建 pip 配置目录：
+```bash
+mkdir -p ~/Library/Application\ Support/pip
+```
+
+2. 创建 pip.conf 文件并添加以下内容：
+```ini
+[global]
+trusted-host = pypi.org
+               files.pythonhosted.org
+               pypi.python.org
+```
+
+3. 将配置文件复制到正确位置：
+```bash
+cp pip.conf ~/Library/Application\ Support/pip/
+```
+
+#### 构建 macOS 应用
+
+1. 安装 py2app：
+```bash
+pip install py2app
+```
+
+2. 构建应用程序：
+```bash
+python setup.py py2app
+```
+
+构建完成后，应用程序会在 `dist` 目录中生成。首次运行时会请求辅助功能权限，授权后即可在后台监控剪贴板变化。
+
 ## 更新日志
 
 ### v2.1.0 (2025-01-04)
