@@ -655,11 +655,11 @@ class MainWindow(QMainWindow):
             self.mqtt_client.enable_logger()
             
             # 添加额外的调试回调
-            def on_subscribe(client, userdata, mid, reason_code, properties):
-                print(f"订阅结果 - mid: {mid}, reason_code: {reason_code}")
+            def on_subscribe(client, userdata, mid, reason_codes_all, properties):
+                print(f"订阅结果 - mid: {mid}, reason_codes: {reason_codes_all}")
                 
-            def on_publish(client, userdata, mid):
-                print(f"消息已发布 - mid: {mid}")
+            def on_publish(client, userdata, mid, reason_code=None, properties=None):
+                print(f"消息已发布 - mid: {mid}, reason_code: {reason_code}")
                 
             def on_log(client, userdata, level, buf):
                 print(f"MQTT日志: {buf}")
