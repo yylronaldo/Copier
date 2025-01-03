@@ -67,9 +67,29 @@ class MainWindow(QMainWindow):
             try:
                 # 尝试导入 macOS 特定的模块
                 import objc
-                from Foundation import NSString, NSPasteboard, NSObject
-                from AppKit import NSWorkspace, NSPasteboardTypeString
+                from Foundation import NSString, NSPasteboard, NSObject, NSURL
+                from AppKit import (NSWorkspace, NSPasteboardTypeString, NSApplication,
+                                 NSApp, NSAlert, NSWorkspaceWillPowerOffNotification)
                 import Cocoa
+                from ApplicationServices import AXIsProcessTrusted, AXAPIEnabled
+                
+                # 检查辅助功能权限
+                if not AXIsProcessTrusted():
+                    print("需要辅助功能权限")
+                    alert = NSAlert.alloc().init()
+                    alert.setMessageText_("需要辅助功能权限")
+                    alert.setInformativeText_("Copier 需要辅助功能权限来监控剪贴板变化。请在系统偏好设置中授予权限。")
+                    alert.addButtonWithTitle_("打开系统偏好设置")
+                    alert.addButtonWithTitle_("退出")
+                    
+                    if alert.runModal() == NSAlert.NSAlertFirstButtonReturn:
+                        # 打开系统偏好设置的辅助功能面板
+                        NSURL.URLWithString_("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility").open()
+                        sys.exit(0)
+                    else:
+                        sys.exit(1)
+                
+                print("已获得辅助功能权限")
                 
                 # 创建一个 NSObject 子类来监听剪贴板变化
                 class PasteboardObserver(NSObject):
