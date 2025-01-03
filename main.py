@@ -580,50 +580,11 @@ class MainWindow(QMainWindow):
                 import traceback
                 traceback.print_exc()
 
-    def process_received_text(self, content):
-        """处理接收到的文本内容"""
-        try:
-            # 标记正在接收内容
-            self.is_receiving_content = True
-            
-            # 还原内容
-            text_content = self.data_processor.restore_clipboard_data("text", content)
-            print(f"还原后的文本长度: {len(text_content)}")
-            
-            # 计算内容哈希，避免重复处理
-            content_hash = self.calculate_content_hash("text", content)
-            if content_hash == self.last_content_hash:
-                print("忽略重复的文本内容")
-                return
-                
-            self.last_content_hash = content_hash
-            self.last_sent_hash = content_hash  # 同时更新发送哈希
-            
-            # 更新预览和历史
-            self.update_preview("text", text_content)
-            self.add_to_history("text", text_content, int(time.time() * 1000))
-            
-            # 更新剪贴板
-            print("更新剪贴板文本内容")
-            self.clipboard.setText(text_content)
-            
-        except Exception as e:
-            print(f"处理文本内容时出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            # 确保标志被重置
-            self.is_receiving_content = False
-
     def process_received_image(self, content):
         """处理接收到的图片内容"""
         try:
             # 标记正在接收内容
             self.is_receiving_content = True
-            
-            # 还原内容
-            image_content = self.data_processor.restore_clipboard_data("image", content)
-            print(f"还原后的图片大小: {image_content.size()}")
             
             # 计算内容哈希，避免重复处理
             content_hash = self.calculate_content_hash("image", content)
@@ -631,6 +592,10 @@ class MainWindow(QMainWindow):
                 print("忽略重复的图片内容")
                 return
                 
+            # 还原内容
+            image_content = self.data_processor.restore_clipboard_data("image", content)
+            print(f"还原后的图片大小: {image_content.size()}")
+            
             self.last_content_hash = content_hash
             self.last_sent_hash = content_hash  # 同时更新发送哈希
             
@@ -650,93 +615,55 @@ class MainWindow(QMainWindow):
             # 确保标志被重置
             self.is_receiving_content = False
             
-    def on_disconnect(self, client, userdata, reason_code, properties=None, disconnect_flags=None):
-        """MQTT v5 断开连接回调"""
-        reason = properties.get("reason_string", "未知原因") if properties else "未知原因"
-        self.status_label.setText(f"已断开连接 ({reason})，正在重试...")
-        self.mqtt_connected = False
-        
-        # 使用 singleShot 在主线程中启动重连定时器
-        if not self.reconnect_timer.isActive():
-            QTimer.singleShot(0, lambda: self.reconnect_timer.start())
-
-    def setup_mqtt(self):
-        """设置MQTT连接"""
-        if self.mqtt_client and self.mqtt_connected:
-            return
-            
+    def process_received_text(self, content):
+        """处理接收到的文本内容"""
         try:
-            config = load_config()
-            mqtt_config = config.get('mqtt', {})
+            # 标记正在接收内容
+            self.is_receiving_content = True
             
-            if self.mqtt_client:
-                try:
-                    self.mqtt_client.disconnect()
-                    self.mqtt_client.loop_stop()
-                except:
-                    pass
-            
-            # 使用新版本的 MQTT 客户端
-            self.mqtt_client = mqtt.Client(
-                client_id=self.client_id,
-                protocol=mqtt.MQTTv5,
-                callback_api_version=mqtt.CallbackAPIVersion.VERSION2
-            )
-            
-            # 启用调试日志
-            self.mqtt_client.enable_logger()
-            
-            # 添加额外的调试回调
-            def on_subscribe(client, userdata, mid, reason_codes_all, properties):
-                print(f"订阅结果 - mid: {mid}, reason_codes: {reason_codes_all}")
+            # 计算内容哈希，避免重复处理
+            content_hash = self.calculate_content_hash("text", content)
+            if content_hash == self.last_content_hash:
+                print("忽略重复的文本内容")
+                return
                 
-            def on_publish(client, userdata, mid, reason_code=None, properties=None):
-                print(f"消息已发布 - mid: {mid}, reason_code: {reason_code}")
-                
-            def on_log(client, userdata, level, buf):
-                print(f"MQTT日志: {buf}")
-                
-            self.mqtt_client.on_subscribe = on_subscribe
-            self.mqtt_client.on_publish = on_publish
-            self.mqtt_client.on_log = on_log
+            # 还原内容
+            text_content = self.data_processor.restore_clipboard_data("text", content)
+            print(f"还原后的文本长度: {len(text_content)}")
             
-            if mqtt_config.get('username'):
-                self.mqtt_client.username_pw_set(
-                    mqtt_config['username'],
-                    mqtt_config.get('password', '')
-                )
+            self.last_content_hash = content_hash
+            self.last_sent_hash = content_hash  # 同时更新发送哈希
             
-            # 设置回调函数
-            self.mqtt_client.on_connect = self.on_connect
-            self.mqtt_client.on_disconnect = self.on_disconnect
-            self.mqtt_client.on_message = self.on_mqtt_message
+            # 更新预览和历史
+            self.update_preview("text", text_content)
+            self.add_to_history("text", text_content, int(time.time() * 1000))
             
-            # 设置更长的保活时间，特别是在Windows上
-            keepalive = 60 if not self.is_windows else 120
-            
-            # 设置遗嘱消息
-            will_topic = f"{mqtt_config.get('topic_prefix', 'copier/clipboard')}/status"
-            will_payload = json.dumps({
-                "client_id": self.client_id,
-                "status": "offline",
-                "timestamp": int(time.time() * 1000)
-            })
-            self.mqtt_client.will_set(will_topic, will_payload, qos=1, retain=True)
-            
-            host = mqtt_config.get('host', 'localhost')
-            port = mqtt_config.get('port', 1883)
-            print(f"正在连接到MQTT服务器: {host}:{port}")
-            
-            self.mqtt_client.connect(host, port, keepalive)
-            self.mqtt_client.loop_start()
+            # 更新剪贴板
+            print("更新剪贴板文本内容")
+            self.clipboard.setText(text_content)
             
         except Exception as e:
-            error_msg = f"MQTT连接失败: {str(e)}"
-            print(error_msg)
-            self.status_label.setText(error_msg)
-            if not self.reconnect_timer.isActive():
-                self.reconnect_timer.moveToThread(QApplication.instance().thread())
-                self.reconnect_timer.start()
+            print(f"处理文本内容时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # 确保标志被重置
+            self.is_receiving_content = False
+            
+    def on_disconnect(self, client, userdata, reason_code, properties=None, disconnect_flags=None):
+        """MQTT v5 断开连接回调"""
+        try:
+            if isinstance(properties, dict):
+                reason = properties.get("reason_string", "未知原因")
+            else:
+                reason = str(reason_code) if reason_code else "未知原因"
+                
+            print(f"MQTT断开连接 - 原因: {reason}")
+            self.status_label.setText(f"已断开连接 ({reason})，正在重试...")
+            self.mqtt_connected = False
+        except Exception as e:
+            print(f"处理断开连接回调时出错: {str(e)}")
+            self.mqtt_connected = False
 
     def calculate_content_hash(self, content_type: str, content) -> str:
         """计算内容的哈希值"""
