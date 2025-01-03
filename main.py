@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
         
         # 剪贴板
         self.clipboard = QApplication.clipboard()
+        self.clipboard.dataChanged.connect(self.on_clipboard_change)
         
         # 上一次的剪贴板内容哈希
         self.last_content_hash = None
@@ -265,40 +266,40 @@ class MainWindow(QMainWindow):
         # 初始化系统托盘
         self.setup_tray()
         
-        # 重连计时器
-        self.reconnect_timer = QTimer()
-        self.reconnect_timer.timeout.connect(self.setup_mqtt)
-        self.reconnect_timer.setInterval(5000 if not self.is_windows else 10000)  # Windows下增加重连间隔
-        # 确保定时器在主线程中运行
-        self.reconnect_timer.moveToThread(QApplication.instance().thread())
-        
-        # MQTT客户端
-        self.mqtt_client = None
-        self.mqtt_connected = False
-        
-        # 初始化MQTT客户端
-        self.setup_mqtt()
-        
-        # 设置窗口标志，允许在失去焦点时继续接收事件
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
-        
-        # 剪贴板监控定时器
-        self.clipboard_timer = QTimer(self)
-        self.clipboard_timer.timeout.connect(self.check_clipboard)
         # 启动时先禁用剪贴板监听
         self.clipboard_monitoring_enabled = False
         
-        # 添加剪贴板变化延迟检查
-        self.clipboard_check_timer = QTimer()
-        self.clipboard_check_timer.setSingleShot(True)
-        self.clipboard_check_timer.timeout.connect(self.check_clipboard)
-        self.last_clipboard_change = 0
+        # 初始化剪贴板监控定时器
+        self.clipboard_timer = QTimer(self)
+        self.clipboard_timer.timeout.connect(self.check_clipboard)
+        self.clipboard_timer.start(500)  # 每500毫秒检查一次
         
-        # 记录初始剪贴板内容的哈希
-        self.record_initial_clipboard_hash()
+        # 添加剪贴板变化延迟检查
+        self.last_clipboard_change = 0
         
         # 设置快捷键
         self.setup_shortcuts()
+        
+        # 初始化MQTT客户端
+        self.mqtt_client = None
+        self.mqtt_connected = False
+        self.reconnect_timer = QTimer()
+        self.reconnect_timer.timeout.connect(self.setup_mqtt)
+        self.reconnect_timer.setInterval(5000)  # 5秒后重试
+        
+        # 设置MQTT连接
+        self.setup_mqtt()
+        
+        # 添加一个标志来跟踪是否正在接收内容
+        self.is_receiving_content = False
+        self.received_hashes = set()   # 用于跟踪最近接收的内容哈希
+        self.sent_hashes = set()       # 用于跟踪最近发送的内容哈希
+        self.hash_cleanup_timer = QTimer()
+        self.hash_cleanup_timer.timeout.connect(self.cleanup_hashes)
+        self.hash_cleanup_timer.start(60000)  # 每分钟清理一次
+        
+        # 记录初始剪贴板内容的哈希
+        self.record_initial_clipboard_hash()
         
         # 默认隐藏窗口，在系统托盘运行
         self.hide()
@@ -312,14 +313,6 @@ class MainWindow(QMainWindow):
         self.pending_data = []
         self.pending_data_lock = threading.Lock()
         
-        # 添加一个标志来跟踪是否正在接收内容
-        self.is_receiving_content = False
-        self.received_hashes = set()   # 用于跟踪最近接收的内容哈希
-        self.sent_hashes = set()       # 用于跟踪最近发送的内容哈希
-        self.hash_cleanup_timer = QTimer()
-        self.hash_cleanup_timer.timeout.connect(self.cleanup_hashes)
-        self.hash_cleanup_timer.start(60000)  # 每分钟清理一次
-
     def update_preview(self, content_type: str, content):
         """更新预览区域"""
         if content_type == "text":
@@ -454,6 +447,12 @@ class MainWindow(QMainWindow):
         if clipboard_item.content_type == "image":
             thumb = clipboard_item.content.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             item.setIcon(QIcon(QPixmap.fromImage(thumb)))
+
+    def on_clipboard_change(self):
+        """剪贴板内容变化回调"""
+        if not self.clipboard_monitoring_enabled or self.is_receiving_content:
+            return
+        self.check_clipboard()
 
     def check_clipboard(self):
         """检查剪贴板内容是否发生变化"""
