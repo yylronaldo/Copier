@@ -21,21 +21,6 @@ from settings_dialog import SettingsDialog
 from config import load_config, save_config
 from data_processor import DataProcessor
 import platform
-import threading
-
-# macOS 特定的模块导入
-MACOS_MODULES_AVAILABLE = False
-if platform.system().lower() == 'darwin':
-    try:
-        import objc
-        from Foundation import NSString, NSPasteboard, NSObject, NSURL
-        from AppKit import (NSWorkspace, NSPasteboardTypeString, NSApplication,
-                        NSApp, NSAlert, NSWorkspaceWillPowerOffNotification)
-        import Cocoa
-        from ApplicationServices import AXIsProcessTrusted, AXAPIEnabled
-        MACOS_MODULES_AVAILABLE = True
-    except ImportError:
-        print("macOS 模块导入失败")
 
 class ClipboardItem:
     def __init__(self, content_type: str, content, timestamp: int):
@@ -79,6 +64,9 @@ class MainWindow(QMainWindow):
         self.is_macos = platform.system().lower() == 'darwin'
         print(f"操作系统: {'macOS' if self.is_macos else 'Windows' if self.is_windows else 'Other'}")
         
+        # 初始化pasteboard为None
+        self.pasteboard = None
+        
         # 初始化数据处理器
         print("初始化数据处理器...")
         self.data_processor = DataProcessor()
@@ -97,6 +85,13 @@ class MainWindow(QMainWindow):
         self.clipboard_debounce_timer = QTimer()
         self.clipboard_debounce_timer.setSingleShot(True)
         self.clipboard_debounce_timer.timeout.connect(self.check_clipboard)
+        
+        # 添加轮询定时器
+        self.polling_timer = QTimer()
+        self.polling_timer.timeout.connect(self.check_clipboard)
+        
+        # 记录上一次剪贴板内容的哈希值
+        self.last_clipboard_hash = None
         
         # 设置快捷键
         self.setup_shortcuts()
@@ -117,140 +112,58 @@ class MainWindow(QMainWindow):
         self.received_hashes = set()   # 用于跟踪最近接收的内容哈希
         self.sent_hashes = set()       # 用于跟踪最近发送的内容哈希
         
-        # 在 macOS 上尝试使用 NSPasteboard
-        if self.is_macos and MACOS_MODULES_AVAILABLE:
-            print("检查辅助功能权限...")
-            try:
-                # 检查辅助功能权限
-                if not AXIsProcessTrusted():
-                    print("需要辅助功能权限")
-                    alert = NSAlert.alloc().init()
-                    alert.setMessageText_("需要辅助功能权限")
-                    alert.setInformativeText_("Copier 需要辅助功能权限来监控剪贴板变化。请在系统偏好设置中授予权限。")
-                    alert.addButtonWithTitle_("打开系统偏好设置")
-                    alert.addButtonWithTitle_("退出")
-                    
-                    response = alert.runModal()
-                    print(f"用户选择: {response}")
-                    if response == 1000:  # NSAlertFirstButtonReturn
-                        # 打开系统偏好设置的辅助功能面板
-                        url = NSURL.URLWithString_("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-                        NSWorkspace.sharedWorkspace().openURL_(url)
-                        print("已打开系统偏好设置")
-                        
-                        # 设置定时器检查权限状态
-                        print("启动权限检查定时器...")
-                        self.permission_timer = QTimer()
-                        self.permission_timer.timeout.connect(self.check_permission)
-                        self.permission_timer.start(1000)  # 每秒检查一次
-                    else:
-                        print("用户选择退出")
-                        sys.exit(0)
-                else:
-                    print("已有辅助功能权限")
-                    self.enable_clipboard_monitoring()
-                
-                # 获取 NSPasteboard
-                print("初始化 NSPasteboard...")
-                self.pasteboard = NSPasteboard.generalPasteboard()
-                self.last_change_count = self.pasteboard.changeCount()
-                self.macos_modules_available = True
-                print(f"NSPasteboard 初始化成功，当前变化计数: {self.last_change_count}")
-                
-                # 设置关机通知观察者
-                print("设置关机通知观察者...")
-                self.observer = self.PasteboardObserver.alloc().initWithCallback_(self.cleanup_and_quit)
-                NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
-                    self.observer,
-                    self.observer.handlePowerOff_,
-                    NSWorkspaceWillPowerOffNotification,
-                    None
-                )
-                print("关机通知观察者设置成功")
-                
-            except Exception as e:
-                print(f"初始化 NSPasteboard 失败: {e}")
-                import traceback
-                traceback.print_exc()
-                self.macos_modules_available = False
-        else:
-            print("macOS 模块不可用")
-            self.macos_modules_available = False
-        
         # 记录初始剪贴板内容的哈希
         self.record_initial_clipboard_hash()
         
         # 总是显示主界面
         self.show()
 
-    def check_permission(self):
-        """检查辅助功能权限状态"""
-        print("检查权限状态...")
-        if AXIsProcessTrusted():
-            print("已获得辅助功能权限")
-            self.permission_timer.stop()
-            print("权限检查定时器已停止")
-            self.enable_clipboard_monitoring()
-            print("剪贴板监控已启用")
-        else:
-            print("等待用户授予权限...")
-
     def enable_clipboard_monitoring(self):
         """启用剪贴板监听"""
         print("启用剪贴板监听...")
         self.clipboard_monitoring_enabled = True
-        
-        if self.is_macos and MACOS_MODULES_AVAILABLE:
-            # macOS 使用定时器检查剪贴板变化
-            print("设置剪贴板检查定时器...")
-            if not hasattr(self, 'clipboard_timer'):
-                self.clipboard_timer = QTimer()
-                self.clipboard_timer.timeout.connect(self.check_clipboard)
-            if not self.clipboard_timer.isActive():
-                self.clipboard_timer.start(1000)  # 每秒检查一次
-                print("剪贴板检查定时器已启动")
-        else:
-            # Windows 使用剪贴板变化信号
-            print("设置剪贴板变化信号...")
-            self.clipboard.dataChanged.connect(self.on_clipboard_change)
-            print("剪贴板变化信号已连接")
+        print("剪贴板监听已启用")
+        self.polling_timer.start(1000)  # 启动轮询定时器
 
     def check_clipboard(self):
-        """检查剪贴板变化（仅用于 macOS）"""
+        """检查剪贴板变化"""
         if not self.clipboard_monitoring_enabled:
-            return
-        
-        if not self.is_macos or not MACOS_MODULES_AVAILABLE:
             return
             
         try:
-            current_count = self.pasteboard.changeCount()
-            if current_count != self.last_change_count:
-                print(f"检测到剪贴板变化：{self.last_change_count} -> {current_count}")
-                self.last_change_count = current_count
+            mime = self.clipboard.mimeData()
+            current_hash = None
+            
+            if mime.hasText():
+                text = mime.text()
+                if text:
+                    current_hash = hashlib.md5(text.encode()).hexdigest()
+            elif mime.hasImage():
+                image = mime.imageData()
+                if image:
+                    buffer = QByteArray()
+                    buffer_device = QBuffer(buffer)
+                    buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
+                    image.save(buffer_device, "PNG")
+                    buffer_device.close()
+                    current_hash = hashlib.md5(buffer.data()).hexdigest()
+            
+            # 如果内容有变化，处理新内容
+            if current_hash and current_hash != self.last_clipboard_hash:
+                print("检测到剪贴板内容变化")
+                self.last_clipboard_hash = current_hash
                 
-                # 获取剪贴板内容
-                if self.pasteboard.types():
-                    print(f"剪贴板类型: {self.pasteboard.types()}")
-                    # 检查是否有文本内容
-                    if "public.utf8-plain-text" in self.pasteboard.types():
-                        text = self.pasteboard.stringForType_("public.utf8-plain-text")
-                        if text:
-                            print(f"从 NSPasteboard 获取到文本，长度：{len(text)}")
-                            self.process_text(text)
-                            return
-                    
-                    # 检查是否有图片内容
-                    image_types = ["public.png", "public.tiff", "public.jpeg"]
-                    for image_type in image_types:
-                        if image_type in self.pasteboard.types():
-                            image_data = self.pasteboard.dataForType_(image_type)
-                            if image_data:
-                                print(f"从 NSPasteboard 获取到图片")
-                                self.process_image(image_data)
-                                return
-                else:
-                    print("NSPasteboard 内容为空")
+                if mime.hasText():
+                    text = mime.text()
+                    if text:
+                        print(f"从剪贴板获取到文本，长度：{len(text)}")
+                        self.process_text(text)
+                elif mime.hasImage():
+                    image = mime.imageData()
+                    if image:
+                        print("从剪贴板获取到图片")
+                        self.process_image(image)
+                        
         except Exception as e:
             print(f"检查剪贴板时出错: {e}")
             import traceback
@@ -736,56 +649,65 @@ class MainWindow(QMainWindow):
 
     def cleanup_and_quit(self):
         """清理并退出程序"""
+        print("开始清理资源...")
         try:
             # 停止所有定时器
             if hasattr(self, 'clipboard_debounce_timer'):
                 self.clipboard_debounce_timer.stop()
+            if hasattr(self, 'polling_timer'):
+                self.polling_timer.stop()
+            if hasattr(self, 'reconnect_timer'):
+                self.reconnect_timer.stop()
             
             # 断开MQTT连接
             if hasattr(self, 'mqtt_client') and self.mqtt_client:
                 try:
-                    self.mqtt_client.disconnect()
+                    print("断开MQTT连接...")
+                    if self.mqtt_client.is_connected():
+                        self.publish_status("offline")
+                        self.mqtt_client.disconnect()
                     self.mqtt_client.loop_stop()
-                except:
-                    pass
+                except Exception as e:
+                    print(f"断开MQTT连接时出错: {str(e)}")
+            
+            # 保存窗口状态
+            try:
+                print("保存窗口状态...")
+                settings = QSettings('Copier', 'Copier')
+                settings.setValue('geometry', self.saveGeometry())
+                settings.setValue('windowState', self.saveState())
+            except Exception as e:
+                print(f"保存窗口状态时出错: {str(e)}")
             
             # 清理系统托盘
             if hasattr(self, 'tray_icon'):
+                print("清理系统托盘...")
                 self.tray_icon.hide()
                 self.tray_icon.deleteLater()
             
+            print("清理完成，准备退出...")
             # 使用 singleShot 确保在主线程中退出
-            QTimer.singleShot(0, QApplication.quit)
+            QTimer.singleShot(0, lambda: (
+                QApplication.instance().quit()
+            ))
         except Exception as e:
             print(f"清理资源时出错: {str(e)}")
-            QApplication.quit()
+            import traceback
+            traceback.print_exc()
+            # 如果清理失败，强制退出
+            QApplication.instance().quit()
 
     def closeEvent(self, event):
         """处理窗口关闭事件"""
-        try:
-            # 取消订阅并发布离线状态
-            if self.mqtt_client and self.mqtt_client.is_connected():
-                self.publish_status("offline")
-                self.mqtt_client.disconnect()
-                self.mqtt_client.loop_stop()
-                
-            # 移除 macOS 观察者
-            if self.is_macos and MACOS_MODULES_AVAILABLE and self.macos_modules_available:
-                NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_(self.observer)
-                print("移除 NSPasteboard 观察者")
-                
-            # 保存窗口位置和大小
-            settings = QSettings('Copier', 'Copier')
-            settings.setValue('geometry', self.saveGeometry())
-            settings.setValue('windowState', self.saveState())
+        if hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
+            # 如果托盘图标可见，则隐藏窗口而不是退出
+            event.ignore()
+            self.hide()
+            return
             
-            event.accept()
-            
-        except Exception as e:
-            print(f"处理窗口关闭事件时出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            event.accept()
+        # 如果没有托盘图标，则执行正常的退出流程
+        self.cleanup_and_quit()
+        event.accept()
     
     def setup_shortcuts(self):
         """设置快捷键"""
@@ -1230,22 +1152,21 @@ class MainWindow(QMainWindow):
         self.setup_tray()
 
     def on_clipboard_change(self):
-        """剪贴板内容变化回调（用于 Windows）"""
+        """剪贴板内容变化回调"""
         if not self.clipboard_monitoring_enabled or self.is_receiving_content:
             return
             
         try:
-            # Windows 上使用 Qt 的剪贴板事件
             mime = self.clipboard.mimeData()
             if mime.hasText():
                 text = mime.text()
                 if text:
-                    print(f"从 Qt 剪贴板获取到文本，长度：{len(text)}")
+                    print(f"从剪贴板获取到文本，长度：{len(text)}")
                     self.process_text(text)
             elif mime.hasImage():
                 image = mime.imageData()
                 if image:
-                    print("从 Qt 剪贴板获取到图片")
+                    print("从剪贴板获取到图片")
                     self.process_image(image)
         except Exception as e:
             print(f"处理剪贴板变化时出错: {e}")
