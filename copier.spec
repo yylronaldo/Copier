@@ -11,16 +11,8 @@ a = Analysis(
         'PySide6.QtCore',
         'PySide6.QtGui',
         'PySide6.QtWidgets',
-        'paho.mqtt',
         'paho.mqtt.client',
-        'zstandard',
-        'PIL',
-        'PIL._imagingtk',
-        'PIL._imagingft',
-        'PIL._imagingmath',
-        'PIL._imagingmorph',
-        'PIL._imaginggif',
-        'PIL._imagingbase'
+        'ssl'
     ],
     hookspath=[],
     hooksconfig={},
@@ -32,7 +24,11 @@ a = Analysis(
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(
+    a.pure,
+    a.zipped_data,
+    cipher=block_cipher
+)
 
 exe = EXE(
     pyz,
@@ -66,24 +62,25 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='Copier.app',
-    icon=None,
+    icon='icon.png',
     bundle_identifier='com.yylronaldo.copier',
     info_plist={
-        'NSHighResolutionCapable': True,
+        'LSUIElement': '1',  # 让应用程序不显示在 Dock 中
+        'NSHighResolutionCapable': 'True',
+        'CFBundleShortVersionString': '2.1.0',
+        'CFBundleVersion': '2.1.0',
+        'NSRequiresAquaSystemAppearance': 'False',  # 支持暗色模式
+        'LSMinimumSystemVersion': '10.13',  # 最低支持的 macOS 版本
         'NSAppleEventsUsageDescription': 'Copier needs to access clipboard data to provide clipboard history functionality.',
         'NSPasteboardUsageDescription': 'Copier needs to access clipboard data to provide clipboard history functionality.',
         'NSAccessibilityUsageDescription': 'Copier needs accessibility permissions to monitor clipboard changes.',
-        'LSMinimumSystemVersion': '10.13',
+        'LSApplicationCategoryType': 'public.app-category.utilities',
+        'LSRequiresNativeExecution': True,
+        'NSSupportsAutomaticGraphicsSwitching': True,
         'CFBundleDisplayName': 'Copier',
         'CFBundleName': 'Copier',
         'CFBundleIdentifier': 'com.yylronaldo.copier',
-        'CFBundleVersion': '2.1.0',
-        'CFBundleShortVersionString': '2.1.0',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
-        'LSApplicationCategoryType': 'public.app-category.utilities',
-        'LSRequiresNativeExecution': True,
-        'NSRequiresAquaSystemAppearance': False,
-        'NSSupportsAutomaticGraphicsSwitching': True,
     }
 )

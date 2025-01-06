@@ -21,6 +21,8 @@ from settings_dialog import SettingsDialog
 from config import load_config, save_config
 from data_processor import DataProcessor
 import platform
+import ssl
+import os
 
 class ClipboardItem:
     def __init__(self, content_type: str, content, timestamp: int):
@@ -78,7 +80,7 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         
         # 初始化剪贴板监控状态
-        self.clipboard_monitoring_enabled = False
+        self.clipboard_monitoring_enabled = True  # 默认启用
         self.is_receiving_content = False
         self.last_processed_hash = None
         self.last_processed_time = 0
@@ -91,7 +93,7 @@ class MainWindow(QMainWindow):
         self.clipboard.dataChanged.connect(self.on_clipboard_change)
         
         # 初始化MQTT客户端
-        self.client_id = str(uuid.uuid4())
+        self.client_id = f"copier_{platform.node()}_{uuid.uuid4().hex[:8]}"
         self.mqtt_client = None
         self.mqtt_connected = False
         self.reconnect_timer = QTimer()
@@ -394,7 +396,7 @@ class MainWindow(QMainWindow):
             
             print(f"收到消息 - 主题: {message.topic}, QoS: {message.qos}")
             
-            # 解析不同类型的消息
+            # 处理状态消息
             if message.topic.endswith('/status'):
                 try:
                     status_data = json.loads(message.payload)
@@ -410,35 +412,42 @@ class MainWindow(QMainWindow):
                 return
                 
             try:
-                payload = json.loads(message.payload)
-            except json.JSONDecodeError as e:
-                print(f"JSON解析错误: {str(e)}")
-                return
+                # 获取消息属性
+                content_type = message.properties.ContentType
+                if not content_type:
+                    print("消息缺少内容类型")
+                    return
+                    
+                content_type = content_type.replace('application/x-copier-', '')
+                if content_type not in ['text', 'image']:
+                    print(f"不支持的内容类型: {content_type}")
+                    return
+                    
+                # 处理消息内容
+                self.process_received_data(content_type, message.payload)
                 
-            if payload.get("source") == self.client_id:
-                print("忽略自己发送的消息")
-                return
+                # 发送确认
+                if message.properties.CorrelationData:
+                    response_topic = f"{message.topic}/ack"
+                    response_properties = mqtt.Properties(PacketTypes.PUBLISH)
+                    response_properties.CorrelationData = message.properties.CorrelationData
+                    self.mqtt_client.publish(
+                        response_topic,
+                        "ok",
+                        qos=1,
+                        properties=response_properties
+                    )
                 
-            content_type = payload.get("type")
-            if not content_type:
-                print("消息缺少类型信息")
-                return
-                
-            content = base64.b64decode(payload.get("content", ""))
-            if not content:
-                print("消息内容为空")
-                return
-                
-            print(f"处理{content_type}类型的消息，大小: {len(content)}字节")
-            
-            # 将数据添加到待处理队列
-            self.process_received_data(content_type, content)
+            except Exception as e:
+                print(f"处理消息内容时出错: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 
         except Exception as e:
-            print(f"处理消息时出错: {str(e)}")
+            print(f"MQTT消息回调出错: {str(e)}")
             import traceback
             traceback.print_exc()
-
+            
     def process_received_data(self, content_type: str, content: bytes):
         """处理接收到的数据"""
         try:
@@ -548,25 +557,24 @@ class MainWindow(QMainWindow):
             # 确保标志被重置
             self.is_receiving_content = False
             
-    def on_disconnect(self, client, userdata, reason_code, properties=None, disconnect_flags=None):
-        """MQTT v5 断开连接回调"""
-        try:
-            if isinstance(properties, dict):
-                reason = properties.get("reason_string", "未知原因")
-            else:
-                reason = str(reason_code) if reason_code else "未知原因"
-                
-            print(f"MQTT断开连接 - 原因: {reason}")
-            self.status_label.setText(f"已断开连接 ({reason})，正在重试...")
-            self.mqtt_connected = False
+    def on_disconnect(self, client, userdata, rc):
+        """MQTT断开连接回调"""
+        self.mqtt_connected = False
+        print(f"MQTT断开连接，返回码: {rc}")
+        if rc != 0:
+            print("意外断开连接，启动重连定时器")
+            QMetaObject.invokeMethod(self.reconnect_timer, "start", Qt.QueuedConnection)
             
-            # 使用 singleShot 在主线程中启动重连定时器
-            if not self.reconnect_timer.isActive():
-                QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+    def on_publish(self, client, userdata, mid, reason_code=None, properties=None):
+        """MQTT消息发布回调"""
+        try:
+            status = "成功" if reason_code is None or not reason_code.is_failure else f"失败({reason_code.getName()})"
+            print(f"消息已发布，消息ID: {mid}, 状态: {status}")
         except Exception as e:
-            print(f"处理断开连接回调时出错: {str(e)}")
-            self.mqtt_connected = False
-
+            print(f"处理发布回调时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
     def calculate_content_hash(self, content_type: str, content) -> str:
         """计算内容的哈希值"""
         try:
@@ -599,22 +607,35 @@ class MainWindow(QMainWindow):
         try:
             config = load_config()
             topic_prefix = config.get('mqtt', {}).get('topic_prefix', 'copier/clipboard')
-            topic = f"{topic_prefix}/content"
             
-            # 使用base64编码压缩后的二进制数据
-            payload = {
-                "type": content_type,
-                "content": base64.b64encode(compressed_content).decode(),
-                "source": self.client_id,
-                "timestamp": int(time.time() * 1000)
-            }
+            # 创建消息属性
+            properties = mqtt.Properties(PacketTypes.PUBLISH)
+            properties.MessageExpiryInterval = 3600  # 消息1小时后过期
+            properties.ContentType = f"application/x-copier-{content_type}"
+            properties.PayloadFormatIndicator = 1  # 表示是应用程序定义的数据
             
-            print(f"正在发送消息到主题: {topic}")
-            result = self.mqtt_client.publish(topic, json.dumps(payload), qos=1)
-            print(f"消息发送结果: {result}")
+            # 计算消息ID
+            message_id = str(uuid.uuid4())
+            properties.CorrelationData = message_id.encode()
+            
+            # 发布消息，使用QoS 2确保只传递一次
+            info = self.mqtt_client.publish(
+                f"{topic_prefix}/content",
+                compressed_content,
+                qos=2,  # 使用QoS 2
+                retain=False,
+                properties=properties
+            )
+            
+            # 等待消息发送完成
+            info.wait_for_publish()
+            
+            print(f"消息已发送 - ID: {message_id}, mid: {info.mid}")
             
         except Exception as e:
             print(f"发送消息时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -793,181 +814,172 @@ class MainWindow(QMainWindow):
             self.history_list.takeItem(self.history_list.count() - 1)
 
     def setup_mqtt(self):
-        """设置MQTT连接"""
-        if self.mqtt_client and self.mqtt_connected:
-            return
-            
+        """设置MQTT客户端"""
         try:
-            config = load_config()
-            mqtt_config = config.get('mqtt', {})
-            
-            # 检查必要的配置项
-            if not mqtt_config:
-                print("未找到MQTT配置，跳过MQTT连接")
-                self.status_label.setText("未配置MQTT，仅本地模式")
-                return
-                
-            host = mqtt_config.get('host')
-            port = mqtt_config.get('port')
-            if not host or not port:
-                print("MQTT主机或端口未配置，跳过MQTT连接")
-                self.status_label.setText("未配置MQTT，仅本地模式")
-                return
-            
-            print(f"正在配置MQTT连接 - 主机: {host}, 端口: {port}")
-            
             if self.mqtt_client:
                 try:
                     self.mqtt_client.disconnect()
-                    self.mqtt_client.loop_stop()
-                except Exception as e:
-                    print(f"断开旧连接时出错: {str(e)}")
+                except:
+                    pass
+                    
+            # 加载配置
+            config = load_config()
+            mqtt_config = config.get('mqtt', {})
             
-            # 使用新版本的 MQTT 客户端
+            # 创建新的客户端实例
+            client_id = f"copier_{platform.node()}_{uuid.uuid4().hex[:8]}"
             self.mqtt_client = mqtt.Client(
-                client_id=self.client_id,
+                client_id=client_id,
                 protocol=mqtt.MQTTv5,
-                callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-                reconnect_on_failure=True,  # 启用自动重连
-                transport="websockets" if mqtt_config.get('use_ws', False) else "tcp"  # 支持websocket连接
+                transport="tcp",
+                callback_api_version=mqtt.CallbackAPIVersion.VERSION2
             )
             
-            # 启用调试日志
-            self.mqtt_client.enable_logger()
-            
-            # 设置重连参数
-            self.mqtt_client.reconnect_delay_set(min_delay=1, max_delay=60)  # 重连延迟在1-60秒之间
-            
-            # 添加额外的调试回调
-            def on_subscribe(client, userdata, mid, reason_codes_all, properties):
-                print(f"订阅结果 - mid: {mid}, reason_codes: {reason_codes_all}")
-                
-            def on_publish(client, userdata, mid, reason_code=None, properties=None):
-                print(f"消息已发布 - mid: {mid}, reason_code: {reason_code}")
-                
-            def on_log(client, userdata, level, buf):
-                print(f"MQTT日志: {buf}")
-                
-            self.mqtt_client.on_subscribe = on_subscribe
-            self.mqtt_client.on_publish = on_publish
-            self.mqtt_client.on_log = on_log
-            
-            # 设置认证信息
-            username = mqtt_config.get('username')
-            password = mqtt_config.get('password')
-            if username:
-                print(f"使用用户名认证: {username}")
-                self.mqtt_client.username_pw_set(username, password or '')
-            
-            # 设置回调函数
+            # 设置回调
             self.mqtt_client.on_connect = self.on_connect
             self.mqtt_client.on_disconnect = self.on_disconnect
             self.mqtt_client.on_message = self.on_mqtt_message
+            self.mqtt_client.on_publish = self.on_publish
             
-            # 设置保活时间
-            keepalive = 60  # 使用60秒的心跳间隔
-            
-            # 设置遗嘱消息
-            will_topic = f"{mqtt_config.get('topic_prefix', 'copier/clipboard')}/status"
-            will_payload = json.dumps({
-                "client_id": self.client_id,
-                "status": "offline",
-                "timestamp": int(time.time() * 1000)
-            })
-            self.mqtt_client.will_set(will_topic, will_payload, qos=1, retain=True)
-            
-            print(f"正在连接到MQTT服务器: {host}:{port}")
-            self.status_label.setText(f"正在连接到MQTT服务器...")
+            # 设置客户端选项
+            self.mqtt_client.enable_logger()
             
             try:
-                # 设置MQTT 5.0的连接属性
-                connect_properties = mqtt.Properties(PacketTypes.CONNECT)
-                connect_properties.SessionExpiryInterval = 7200  # 2小时会话过期
-                connect_properties.MaximumPacketSize = 268435455  # 最大数据包大小 (256MB)
-                connect_properties.ReceiveMaximum = 65535  # 最大接收数量
-                connect_properties.TopicAliasMaximum = 10  # 主题别名最大数量
+                # 设置连接属性
+                connect_properties = mqtt.Properties(mqtt.PacketTypes.CONNECT)
+                connect_properties.SessionExpiryInterval = 0  # 会话在断开连接时立即过期
                 
-                # 连接到服务器
-                self.mqtt_client.connect(
-                    host,
-                    port,
-                    keepalive=keepalive,
-                    properties=connect_properties,
-                    clean_start=False  # 使用持久会话
+                # 设置遗嘱消息
+                will_properties = mqtt.Properties(mqtt.PacketTypes.PUBLISH)
+                will_properties.MessageExpiryInterval = 3600  # 1小时后过期
+                will_properties.ContentType = "application/json"
+                
+                will_payload = json.dumps({
+                    "client_id": client_id,
+                    "status": "offline",
+                    "timestamp": int(time.time())
+                }).encode()
+                
+                self.mqtt_client.will_set(
+                    topic=f"{mqtt_config.get('topic_prefix', 'copier/clipboard')}/status",
+                    payload=will_payload,
+                    qos=1,
+                    retain=True,
+                    properties=will_properties
                 )
                 
-                # 启动MQTT事件循环
+                # 设置TLS（如果配置了）
+                if mqtt_config.get('use_tls', False):
+                    # 设置TLS上下文
+                    context = ssl.create_default_context()
+                    
+                    # 如果提供了CA证书，加载它
+                    ca_certs = mqtt_config.get('ca_certs')
+                    if ca_certs and os.path.exists(ca_certs):
+                        context.load_verify_locations(ca_certs)
+                    
+                    # 如果提供了客户端证书和密钥，加载它们
+                    certfile = mqtt_config.get('certfile')
+                    keyfile = mqtt_config.get('keyfile')
+                    if certfile and keyfile and os.path.exists(certfile) and os.path.exists(keyfile):
+                        context.load_cert_chain(certfile, keyfile)
+                    
+                    self.mqtt_client.tls_set_context(context)
+                    
+                    # 如果不验证服务器证书
+                    if not mqtt_config.get('verify_cert', True):
+                        self.mqtt_client.tls_insecure_set(True)
+                
+                # 设置用户名和密码（如果配置了）
+                username = mqtt_config.get('username')
+                password = mqtt_config.get('password')
+                if username:
+                    self.mqtt_client.username_pw_set(username, password)
+                
+                # 连接到服务器
+                host = mqtt_config.get('host', 'localhost')
+                port = mqtt_config.get('port', 1883)
+                keepalive = mqtt_config.get('keepalive', 60)
+                
+                print(f"正在连接到MQTT服务器 {host}:{port}")
+                self.mqtt_client.connect(
+                    host=host,
+                    port=port,
+                    keepalive=keepalive,
+                    properties=connect_properties
+                )
+                
+                # 启动网络循环
                 self.mqtt_client.loop_start()
                 
-                # 启用剪贴板监听
-                QTimer.singleShot(100, self.enable_clipboard_monitoring)
-                
             except Exception as e:
-                print(f"MQTT连接失败: {str(e)}")
-                self.status_label.setText(f"MQTT连接失败: {str(e)}")
+                print(f"连接MQTT服务器时出错: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                self.reconnect_timer.start()
                 
-                # 仍然启用剪贴板监听，但仅本地模式
-                QTimer.singleShot(100, self.enable_clipboard_monitoring)
-                return
-            
         except Exception as e:
-            error_msg = f"MQTT连接失败: {str(e)}"
-            print(error_msg)
-            self.status_label.setText(error_msg)
+            print(f"设置MQTT时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
             
-            # 仍然启用剪贴板监听，但仅本地模式
-            QTimer.singleShot(100, self.enable_clipboard_monitoring)
-            
-            # 启动重连定时器
-            if not self.reconnect_timer.isActive():
-                self.reconnect_timer.moveToThread(QApplication.instance().thread())
-                QTimer.singleShot(0, lambda: self.reconnect_timer.start())
-                
     def on_connect(self, client, userdata, flags, reason_code, properties):
         """MQTT v5 连接回调"""
         try:
             if reason_code.is_failure:
-                error_msg = f"MQTT连接失败 - {reason_code}"
-                print(error_msg)
-                self.status_label.setText(error_msg)
+                print(f"MQTT连接失败，原因: {reason_code.getName()}")
                 self.mqtt_connected = False
-                
-                if not self.reconnect_timer.isActive():
-                    QTimer.singleShot(0, lambda: self.reconnect_timer.start())
+                self.status_label.setText(f"连接失败: {reason_code.getName()}")
+                QMetaObject.invokeMethod(self.reconnect_timer, "start", Qt.QueuedConnection)
                 return
                 
-            print("MQTT连接成功")
+            print(f"MQTT连接成功，返回码: {reason_code.value}")
             self.mqtt_connected = True
-            self.status_label.setText("已连接到MQTT服务器")
-            
-            # 停止重连定时器
-            if self.reconnect_timer.isActive():
-                self.reconnect_timer.stop()
+            self.status_label.setText("已连接")
+            QMetaObject.invokeMethod(self.reconnect_timer, "stop", Qt.QueuedConnection)
             
             # 订阅主题
             config = load_config()
             topic_prefix = config.get('mqtt', {}).get('topic_prefix', 'copier/clipboard')
             topics = [
-                (f"{topic_prefix}/content", 1),  # QoS 1
-                (f"{topic_prefix}/status", 1)    # QoS 1
+                (f"{topic_prefix}/+/content", 2),  # QoS 2，接收所有客户端的内容
+                (f"{topic_prefix}/+/status", 1)    # QoS 1，接收所有客户端的状态
             ]
             
-            print(f"正在订阅主题: {topics}")
-            self.mqtt_client.subscribe(topics)
+            # 订阅主题
+            for topic, qos in topics:
+                print(f"订阅主题: {topic}, QoS: {qos}")
+                subscribe_properties = mqtt.Properties(mqtt.PacketTypes.SUBSCRIBE)
+                subscribe_properties.SubscriptionIdentifier = 1
+                self.mqtt_client.subscribe(topic, qos=qos, properties=subscribe_properties)
+                
+            # 发布上线状态
+            status_payload = json.dumps({
+                "client_id": self.client_id,
+                "status": "online",
+                "timestamp": int(time.time())
+            }).encode()
             
-            # 发布在线状态
-            self.publish_status("online")
+            status_properties = mqtt.Properties(mqtt.PacketTypes.PUBLISH)
+            status_properties.MessageExpiryInterval = 3600  # 1小时后过期
+            status_properties.ContentType = "application/json"
             
-            # 启用剪贴板监听
-            QTimer.singleShot(100, self.enable_clipboard_monitoring)
+            self.mqtt_client.publish(
+                topic=f"{topic_prefix}/status",
+                payload=status_payload,
+                qos=1,
+                retain=True,
+                properties=status_properties
+            )
             
         except Exception as e:
             print(f"处理连接回调时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
             self.mqtt_connected = False
+            self.status_label.setText(f"连接错误: {str(e)}")
+            QMetaObject.invokeMethod(self.reconnect_timer, "start", Qt.QueuedConnection)
             
-            if not self.reconnect_timer.isActive():
-                QTimer.singleShot(0, lambda: self.reconnect_timer.start())
-                
     def publish_status(self, status):
         """发布客户端状态到MQTT服务器"""
         if not self.mqtt_client or not self.mqtt_connected:
@@ -1211,23 +1223,14 @@ class MainWindow(QMainWindow):
                     buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
                     scaled_image.save(buffer_device, "PNG")
                     buffer_device.close()
-                    
                     current_hash = hashlib.md5(buffer.data()).hexdigest()
-                    if current_hash == self.last_processed_hash:
-                        print("相同的图片内容，跳过")
-                        return
-                        
-                    print("从剪贴板获取到新图片")
-                    self.last_processed_hash = current_hash
-                    self.last_processed_time = current_time
-                    self.process_image(scaled_image)
-                    
-                    # 清理资源
-                    buffer = None
-                    scaled_image = None
-                    return  # 如果处理了图片就直接返回
-                    
-            if mime.hasUrls():
+                    buffer = None  # 清理缓冲区
+            
+            if mime.hasText():
+                text = mime.text()
+                if text:
+                    current_hash = hashlib.md5(text.encode()).hexdigest()
+            elif mime.hasUrls():
                 for url in mime.urls():
                     file_path = url.toLocalFile()
                     if file_path and any(file_path.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']):
@@ -1242,68 +1245,41 @@ class MainWindow(QMainWindow):
                                 buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
                                 scaled_image.save(buffer_device, "PNG")
                                 buffer_device.close()
-                                
                                 current_hash = hashlib.md5(buffer.data()).hexdigest()
-                                if current_hash == self.last_processed_hash:
-                                    print("相同的图片内容，跳过")
-                                    return
-                                    
-                                print(f"从文件加载图片: {file_path}")
-                                self.last_processed_hash = current_hash
-                                self.last_processed_time = current_time
-                                self.process_image(scaled_image)
-                                
-                                # 清理资源
-                                buffer = None
-                                scaled_image = None
-                                return  # 如果处理了图片就直接返回
+                                buffer = None  # 清理缓冲区
                         except Exception as e:
                             print(f"处理图片文件时出错: {str(e)}")
-                            
-            if mime.hasText():
-                text = mime.text()
-                if text:
-                    # 如果文本看起来像是图片文件路径，尝试加载图片
-                    if any(text.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']):
-                        try:
-                            image = QImage(text)
-                            if not image.isNull():
-                                # 转换为固定格式和大小的图片以确保一致性
-                                scaled_image = image.scaled(800, 800, Qt.AspectRatioMode.KeepAspectRatio, 
-                                                         Qt.TransformationMode.SmoothTransformation)
-                                buffer = QByteArray()
-                                buffer_device = QBuffer(buffer)
-                                buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
-                                scaled_image.save(buffer_device, "PNG")
-                                buffer_device.close()
-                                
-                                current_hash = hashlib.md5(buffer.data()).hexdigest()
-                                if current_hash == self.last_processed_hash:
-                                    print("相同的图片内容，跳过")
-                                    return
-                                    
-                                print(f"从文本路径加载图片: {text}")
-                                self.last_processed_hash = current_hash
-                                self.last_processed_time = current_time
-                                self.process_image(scaled_image)
-                                
-                                # 清理资源
-                                buffer = None
-                                scaled_image = None
-                                return  # 如果处理了图片就直接返回
-                        except Exception as e:
-                            print(f"从文本路径加载图片时出错: {str(e)}")
-                    
-                    # 如果不是图片文件路径，则处理为普通文本
-                    current_hash = hashlib.md5(text.encode()).hexdigest()
-                    if current_hash == self.last_processed_hash:
-                        print("相同的文本内容，跳过")
-                        return
-                    print(f"从剪贴板获取到文本，长度：{len(text)}")
-                    self.last_processed_hash = current_hash
-                    self.last_processed_time = current_time
-                    self.process_text(text)
+            
+            # 如果内容有变化，处理新内容
+            if current_hash and current_hash != self.last_processed_hash:
+                print(f"检测到剪贴板内容变化，新哈希值: {current_hash}")
+                self.last_processed_hash = current_hash
                 
+                if mime.hasImage():
+                    image = mime.imageData()
+                    if image and not image.isNull():
+                        print("从剪贴板获取到新图片")
+                        self.last_processed_time = current_time
+                        self.process_image(image)
+                elif mime.hasText():
+                    text = mime.text()
+                    if text:
+                        print(f"从剪贴板获取到文本，长度：{len(text)}")
+                        self.last_processed_time = current_time
+                        self.process_text(text)
+                elif mime.hasUrls():
+                    for url in mime.urls():
+                        file_path = url.toLocalFile()
+                        if file_path and any(file_path.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']):
+                            try:
+                                image = QImage(file_path)
+                                if not image.isNull():
+                                    print(f"从文件加载图片: {file_path}")
+                                    self.last_processed_time = current_time
+                                    self.process_image(image)
+                            except Exception as e:
+                                print(f"处理图片文件时出错: {str(e)}")
+            
         except Exception as e:
             print(f"处理剪贴板变化时出错: {e}")
             import traceback
