@@ -10,7 +10,17 @@ a = Analysis(
     hiddenimports=[
         'PySide6.QtCore',
         'PySide6.QtGui',
-        'PySide6.QtWidgets'
+        'PySide6.QtWidgets',
+        'paho.mqtt',
+        'paho.mqtt.client',
+        'zstandard',
+        'PIL',
+        'PIL._imagingtk',
+        'PIL._imagingft',
+        'PIL._imagingmath',
+        'PIL._imagingmorph',
+        'PIL._imaginggif',
+        'PIL._imagingbase'
     ],
     hookspath=[],
     hooksconfig={},
@@ -69,5 +79,11 @@ app = BUNDLE(
         'CFBundleIdentifier': 'com.yylronaldo.copier',
         'CFBundleVersion': '2.1.0',
         'CFBundleShortVersionString': '2.1.0',
+        'CFBundlePackageType': 'APPL',
+        'CFBundleSignature': '????',
+        'LSApplicationCategoryType': 'public.app-category.utilities',
+        'LSRequiresNativeExecution': True,
+        'NSRequiresAquaSystemAppearance': False,
+        'NSSupportsAutomaticGraphicsSwitching': True,
     }
 )
