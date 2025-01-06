@@ -827,11 +827,16 @@ class MainWindow(QMainWindow):
             self.mqtt_client = mqtt.Client(
                 client_id=self.client_id,
                 protocol=mqtt.MQTTv5,
-                callback_api_version=mqtt.CallbackAPIVersion.VERSION2
+                callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+                reconnect_on_failure=True,  # 启用自动重连
+                transport="websockets" if mqtt_config.get('use_ws', False) else "tcp"  # 支持websocket连接
             )
             
             # 启用调试日志
             self.mqtt_client.enable_logger()
+            
+            # 设置重连参数
+            self.mqtt_client.reconnect_delay_set(min_delay=1, max_delay=60)  # 重连延迟在1-60秒之间
             
             # 添加额外的调试回调
             def on_subscribe(client, userdata, mid, reason_codes_all, properties):
@@ -859,8 +864,8 @@ class MainWindow(QMainWindow):
             self.mqtt_client.on_disconnect = self.on_disconnect
             self.mqtt_client.on_message = self.on_mqtt_message
             
-            # 设置更长的保活时间，特别是在Windows上
-            keepalive = 60 if not self.is_windows else 120
+            # 设置保活时间
+            keepalive = 60  # 使用60秒的心跳间隔
             
             # 设置遗嘱消息
             will_topic = f"{mqtt_config.get('topic_prefix', 'copier/clipboard')}/status"
@@ -875,11 +880,23 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"正在连接到MQTT服务器...")
             
             try:
-                # 设置连接选项
+                # 设置MQTT 5.0的连接属性
                 connect_properties = mqtt.Properties(PacketTypes.CONNECT)
                 connect_properties.SessionExpiryInterval = 7200  # 2小时会话过期
+                connect_properties.MaximumPacketSize = 268435455  # 最大数据包大小 (256MB)
+                connect_properties.ReceiveMaximum = 65535  # 最大接收数量
+                connect_properties.TopicAliasMaximum = 10  # 主题别名最大数量
                 
-                self.mqtt_client.connect(host, port, keepalive, properties=connect_properties)
+                # 连接到服务器
+                self.mqtt_client.connect(
+                    host,
+                    port,
+                    keepalive=keepalive,
+                    properties=connect_properties,
+                    clean_start=False  # 使用持久会话
+                )
+                
+                # 启动MQTT事件循环
                 self.mqtt_client.loop_start()
                 
                 # 启用剪贴板监听
@@ -1183,19 +1200,7 @@ class MainWindow(QMainWindow):
             mime = self.clipboard.mimeData()
             current_hash = None
             
-            if mime.hasText():
-                text = mime.text()
-                if text:
-                    current_hash = hashlib.md5(text.encode()).hexdigest()
-                    if current_hash == self.last_processed_hash:
-                        print("相同的文本内容，跳过")
-                        return
-                    print(f"从剪贴板获取到文本，长度：{len(text)}")
-                    self.last_processed_hash = current_hash
-                    self.last_processed_time = current_time
-                    self.process_text(text)
-                    
-            elif mime.hasImage():
+            if mime.hasImage():
                 image = mime.imageData()
                 if image and not image.isNull():
                     # 转换为固定格式和大小的图片以确保一致性
@@ -1220,7 +1225,85 @@ class MainWindow(QMainWindow):
                     # 清理资源
                     buffer = None
                     scaled_image = None
+                    return  # 如果处理了图片就直接返回
                     
+            if mime.hasUrls():
+                for url in mime.urls():
+                    file_path = url.toLocalFile()
+                    if file_path and any(file_path.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']):
+                        try:
+                            image = QImage(file_path)
+                            if not image.isNull():
+                                # 转换为固定格式和大小的图片以确保一致性
+                                scaled_image = image.scaled(800, 800, Qt.AspectRatioMode.KeepAspectRatio, 
+                                                         Qt.TransformationMode.SmoothTransformation)
+                                buffer = QByteArray()
+                                buffer_device = QBuffer(buffer)
+                                buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
+                                scaled_image.save(buffer_device, "PNG")
+                                buffer_device.close()
+                                
+                                current_hash = hashlib.md5(buffer.data()).hexdigest()
+                                if current_hash == self.last_processed_hash:
+                                    print("相同的图片内容，跳过")
+                                    return
+                                    
+                                print(f"从文件加载图片: {file_path}")
+                                self.last_processed_hash = current_hash
+                                self.last_processed_time = current_time
+                                self.process_image(scaled_image)
+                                
+                                # 清理资源
+                                buffer = None
+                                scaled_image = None
+                                return  # 如果处理了图片就直接返回
+                        except Exception as e:
+                            print(f"处理图片文件时出错: {str(e)}")
+                            
+            if mime.hasText():
+                text = mime.text()
+                if text:
+                    # 如果文本看起来像是图片文件路径，尝试加载图片
+                    if any(text.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']):
+                        try:
+                            image = QImage(text)
+                            if not image.isNull():
+                                # 转换为固定格式和大小的图片以确保一致性
+                                scaled_image = image.scaled(800, 800, Qt.AspectRatioMode.KeepAspectRatio, 
+                                                         Qt.TransformationMode.SmoothTransformation)
+                                buffer = QByteArray()
+                                buffer_device = QBuffer(buffer)
+                                buffer_device.open(QBuffer.OpenModeFlag.WriteOnly)
+                                scaled_image.save(buffer_device, "PNG")
+                                buffer_device.close()
+                                
+                                current_hash = hashlib.md5(buffer.data()).hexdigest()
+                                if current_hash == self.last_processed_hash:
+                                    print("相同的图片内容，跳过")
+                                    return
+                                    
+                                print(f"从文本路径加载图片: {text}")
+                                self.last_processed_hash = current_hash
+                                self.last_processed_time = current_time
+                                self.process_image(scaled_image)
+                                
+                                # 清理资源
+                                buffer = None
+                                scaled_image = None
+                                return  # 如果处理了图片就直接返回
+                        except Exception as e:
+                            print(f"从文本路径加载图片时出错: {str(e)}")
+                    
+                    # 如果不是图片文件路径，则处理为普通文本
+                    current_hash = hashlib.md5(text.encode()).hexdigest()
+                    if current_hash == self.last_processed_hash:
+                        print("相同的文本内容，跳过")
+                        return
+                    print(f"从剪贴板获取到文本，长度：{len(text)}")
+                    self.last_processed_hash = current_hash
+                    self.last_processed_time = current_time
+                    self.process_text(text)
+                
         except Exception as e:
             print(f"处理剪贴板变化时出错: {e}")
             import traceback
